@@ -1,0 +1,17 @@
+.git
+.gitignore
+.DS_Store
+.idea
+.vscode
+.venv
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+build
+wordlists
+hashcat.pot
+left_*.txt
+left_*.txt.out
+*.out
+*.pot

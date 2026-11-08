@@ -1,0 +1,165 @@
+[build-system]
+requires = ["setuptools>=84.0.0", "setuptools-scm>=10.2.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hate_crack"
+dynamic = ["version"]
+description = "Menu driven Python wrapper for hashcat"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "requests>=2.34.2",
+    "openpyxl>=3.1.5",
+    "packaging>=26.3",
+    "simple-term-menu==1.6.6",
+    "click>=8.5.0",
+    "rich>=13.9.4",
+    "atomic-agents>=2.10.2",
+    # Imported directly by hate_crack/llm.py; declared explicitly rather than
+    # relying on atomic-agents pulling them in transitively.
+    "instructor>=1.14.5",
+    "openai>=2.54.0",
+    "pydantic>=2.13.5",
+    "python-dotenv>=1.2.3",
+    # Security floors on transitive deps, not imported by hate_crack. Without
+    # them the resolver prefers openai 3.x and backtracks litellm (via
+    # atomic-agents) to 1.83.0, the last release not capping openai<3, which
+    # carries a dozen advisories; that in turn pulls huggingface-hub 1.x and a
+    # vulnerable filelock 3.x. Drop each floor once a fresh resolve no longer
+    # lands below it.
+    "litellm>=1.96.2",
+    "filelock>=4.2.1",
+]
+
+[project.scripts]
+hate_crack = "hate_crack.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["hate_crack*"]
+
+[tool.setuptools.package-data]
+hate_crack = [
+    "config.json.example",
+]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+
+[tool.commitizen]
+# The release workflows drive `cz bump` instead of hand-rolling version
+# arithmetic in bash. Both settings below are load-bearing:
+#
+#   version_provider = "scm" - read the current version from git tags rather
+#   than from a version string in a file. There is nothing to rewrite and no
+#   version-bump commit, which is what lets commitizen compose with the
+#   setuptools_scm config above.
+#
+#   tag_format = "v$version" - the repo's tags have always been v-prefixed.
+#   Commitizen defaults to a bare "$version", which would create tags that
+#   neither setuptools_scm nor any existing tooling recognises and would break
+#   continuity with every tag already published.
+#
+# The bump size is derived from commit messages via tools/next_version.py
+# (see that module's docstring): any `feat` commit since the last release
+# means the batch is heading for MINOR (X.(Y+1).0), and a batch of only
+# fixes, docs and chores is heading for PATCH (X.Y.(Z+1)). Both tagging
+# workflows call that script rather than hand-rolling `cz bump --increment`.
+version_provider = "scm"
+tag_format = "v$version"
+# No CHANGELOG.md rewrite on bump; the changelog is maintained by hand.
+update_changelog_on_bump = false
+
+[tool.ruff]
+exclude = [
+    "build",
+    "dist",
+    "PACK",
+    "hashcat-utils",
+    "omen",
+    "princeprocessor",
+    "wordlists",
+    "rules",
+]
+
+[tool.ruff.lint]
+# Pin to the pre-0.16.0 default rule set so future ruff bumps stay
+# behaviour-neutral. Broadening the ruleset is a separate cleanup, not
+# a dep-bump side effect.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# hate_crack.py's `for _name, _value in _main.__dict__.items(): ...
+# globals().setdefault(...)` shim populates names like `_attacks` at import
+# time by copying them off hate_crack/main.py's module dict. Ruff's static
+# analysis can't see that runtime copy, so every use of those names below the
+# shim reads as undefined: 32 F821s total, 26 for `_attacks` and one each for
+# `show_results`, `show_readme`, `quit_hc`, `notifications_submenu`,
+# `hashview_api`, and `export_excel`. The shim is the point of this file;
+# silencing F821 here is honest, not a cover for a real bug.
+"hate_crack.py" = ["F821"]
+
+[tool.bandit]
+# hate_crack shells out to hashcat and its helper binaries extensively, so the
+# scan produces many low-severity subprocess/shlex findings. These are reviewed
+# and captured in .bandit-baseline.json; CI compares against that baseline so
+# only NEW findings fail the build (mirrors the hashview approach). Scan the
+# first-party package only — bundled third-party trees are excluded.
+exclude_dirs = [
+    "tests",
+    ".venv",
+    "build",
+    "dist",
+    "PACK",
+    "hashcat-utils",
+    "omen",
+    "princeprocessor",
+]
+
+[tool.ty.src]
+exclude = [
+    "build/",
+    "dist/",
+    "PACK/",
+    "wordlists/",
+    "HashcatRosetta/",
+    "hashcat-utils/",
+    "omen/",
+    "princeprocessor/",
+]
+
+[tool.ty.rules]
+# Module-level globals in main.py are assigned at runtime
+unresolved-reference = "warn"
+# Optional deps (hashcat_rosetta) not always installed
+unresolved-import = "warn"
+# Module-level globals and dynamic attribute access
+unresolved-attribute = "warn"
+invalid-argument-type = "warn"
+# ty 0.0.63 tightened these to error for the same legacy pattern
+# (module-level `hcatHashFile = None` etc. in main.py, later used as
+# strings). Downgrade to warn to match the rest.
+unsupported-operator = "warn"
+no-matching-overload = "warn"
+invalid-assignment = "warn"
+unresolved-global = "warn"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+
+[dependency-groups]
+dev = [
+    "ty==0.0.82",
+    "ruff==0.16.8",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "pytest-timeout>=2.4.0",
+    "pexpect>=4.9.0",
+    # Drives version bumps in the release workflows; see [tool.commitizen].
+    "commitizen==4.18.1",
+    # Used by tests/test_release_versioning.py to parse the workflow YAML.
+    "pyyaml==6.0.3",
+]

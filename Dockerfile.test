@@ -1,0 +1,31 @@
+FROM python:3.13-slim
+
+WORKDIR /workspace
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        gzip \
+        hashcat \
+        ocl-icd-libopencl1 \
+        pocl-opencl-icd \
+        p7zip-full \
+        transmission-cli \
+        transmission-daemon \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install -q uv==0.9.28
+
+COPY . /workspace
+
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
+
+RUN make install
+
+ENV PATH="/workspace/.venv/bin:/root/.local/bin:${PATH}"
+ENV HATE_CRACK_SKIP_INIT=1
+
+CMD ["bash", "-lc", "${HOME}/.local/bin/hate_crack --help >/tmp/hc_help.txt && ./hate_crack.py --help >/tmp/hc_script_help.txt"]

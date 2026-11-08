@@ -1,0 +1,1435 @@
+import importlib
+
+import pytest
+
+
+def test_tokenize_runs_splits_letters_digits_symbols():
+    from hate_crack import main as hc_main
+
+    assert hc_main._tokenize_runs("CrawlingHorse432") == [
+        ("L", "CrawlingHorse"),
+        ("D", "432"),
+    ]
+
+
+def test_tokenize_runs_handles_middle_digit_run():
+    from hate_crack import main as hc_main
+
+    assert hc_main._tokenize_runs("ChangeMe2day1624$!") == [
+        ("L", "ChangeMe"),
+        ("D", "2"),
+        ("L", "day"),
+        ("D", "1624"),
+        ("S", "$!"),
+    ]
+
+
+def test_tokenize_runs_empty_string_returns_empty_list():
+    from hate_crack import main as hc_main
+
+    assert hc_main._tokenize_runs("") == []
+
+
+def test_tokenize_runs_merges_non_ascii_letters_into_the_letter_run():
+    from hate_crack import main as hc_main
+
+    # "ö".isalpha() is True in Python, so it joins the surrounding letters
+    # into one "L" run rather than breaking it.
+    assert hc_main._tokenize_runs("Sömmer") == [("L", "Sömmer")]
+
+
+def test_tokenize_runs_classifies_non_ascii_punctuation_as_symbol():
+    from hate_crack import main as hc_main
+
+    # "§" (section sign) is not alphabetic or a digit, so it falls into the
+    # "S" catch-all like any ASCII symbol would.
+    assert hc_main._tokenize_runs("Pass§word1") == [
+        ("L", "Pass"),
+        ("S", "§"),
+        ("L", "word"),
+        ("D", "1"),
+    ]
+
+
+def test_shape_signature_is_run_types_only():
+    from hate_crack import main as hc_main
+
+    runs = hc_main._tokenize_runs("ChangeMe2day1624$!")
+    assert hc_main._shape_signature(runs) == ("L", "D", "L", "D", "S")
+
+
+def test_seed_key_is_letter_run_contents_only():
+    from hate_crack import main as hc_main
+
+    runs = hc_main._tokenize_runs("ChangeMe2day1624$!")
+    assert hc_main._seed_key(runs) == ("ChangeMe", "day")
+
+
+def test_seed_key_empty_when_no_letters():
+    from hate_crack import main as hc_main
+
+    runs = hc_main._tokenize_runs("12345!!!")
+    assert hc_main._seed_key(runs) == ()
+
+
+def test_infer_charset_expands_partial_shift_row_symbols():
+    from hate_crack import main as hc_main
+
+    observed = set("$!#&*^(@%")  # 9 of the 10 US shift-row symbols
+    assert hc_main._infer_charset(observed) == "!@#$%^&*()"
+
+
+def test_infer_charset_expands_partial_digits():
+    from hate_crack import main as hc_main
+
+    observed = set("432559134795")  # digits from the CrawlingHorse cluster
+    assert hc_main._infer_charset(observed) == "0123456789"
+
+
+def test_infer_charset_expands_two_observed_digits_to_the_full_alphabet():
+    """Two distinct digits is enough to call a run a digit run.
+
+    This used to need five (50% of ten), which no three-member cluster could
+    ever supply -- a position shows at most one character per member. The
+    narrow charset that came out instead cost a ?1 slot and a 40x smaller
+    keyspace than the ?d it should have been.
+    """
+    from hate_crack import main as hc_main
+
+    assert hc_main._infer_charset({"1", "2"}) == "0123456789"
+
+
+def test_infer_charset_keeps_a_single_observed_character():
+    """A run that varies only in length has one character in it, and must keep
+    it: _assign_mask_tokens renders a one-character charset as a bare literal,
+    and widening it would invent a whole alphabet the cluster never showed."""
+    from hate_crack import main as hc_main
+
+    assert hc_main._infer_charset({"1"}) == "1"
+
+
+def test_infer_charset_keeps_a_letter_sample_below_its_minimum():
+    """Letters keep a high minimum: 26 or 52 characters per position compounds
+    fast enough to push a template past the keyspace guardrail entirely."""
+    from hate_crack import main as hc_main
+
+    assert hc_main._infer_charset({"a", "b", "c"}) == "abc"
+
+
+def test_infer_charset_returns_sorted_observed_when_no_alphabet_matches():
+    from hate_crack import main as hc_main
+
+    observed = {"z", "9", "!"}  # mixed classes -- not a subset of any one alphabet
+    assert hc_main._infer_charset(observed) == "".join(sorted(observed))
+
+
+def test_build_template_identifies_fixed_and_variable_runs():
+    from hate_crack import main as hc_main
+
+    plaintexts = [
+        "CrawlingHorse432",
+        "CrawlingHorse559",
+        "CrawlingHorse134",
+        "CrawlingHorse795",
+    ]
+    templates, skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+
+    assert skipped == 0
+    assert len(templates) == 1
+    template = templates[0]
+    assert template.fixed_runs == ((0, "L", "CrawlingHorse"),)
+    assert template.variable_positions == (1,)
+    assert template.variable_charsets == ("0123456789",)
+    assert template.length_combinations == ((3,),)
+    assert template.member_count == 4
+    assert template.total_positions == 2
+
+
+def test_build_template_folds_constant_middle_run_into_fixed_skeleton():
+    from hate_crack import main as hc_main
+
+    plaintexts = [
+        "ChangeMe2day1624$!",
+        "ChangeMe2day1625#&*",
+        "ChangeMe2day1924!**",
+    ]
+    templates, skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+
+    assert skipped == 0
+    assert len(templates) == 1
+    template = templates[0]
+    # Position 1 ("2") and position 2 ("day") are constant across all three
+    # members despite "2" being a digit run -- constancy, not run type,
+    # decides fixed vs. variable.
+    assert template.fixed_runs == (
+        (0, "L", "ChangeMe"),
+        (1, "D", "2"),
+        (2, "L", "day"),
+    )
+    assert template.variable_positions == (3, 4)
+    assert set(template.length_combinations) == {(4, 2), (4, 3)}
+
+
+def test_cluster_below_minimum_size_is_dropped():
+    from hate_crack import main as hc_main
+
+    plaintexts = ["Foo111", "Foo222"]  # only 2 members, min is 3
+    templates, skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+    assert templates == []
+    assert skipped == 0
+
+
+def test_all_digit_stem_is_skipped_and_counted():
+    from hate_crack import main as hc_main
+
+    plaintexts = ["111222", "333444", "555666"]  # no alphabetic run at all
+    templates, skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+    assert templates == []
+    assert skipped == 3
+
+
+def test_exact_password_reuse_produces_no_template():
+    from hate_crack import main as hc_main
+
+    plaintexts = ["Summer2025!", "Summer2025!", "Summer2025!"]  # nothing varies
+    templates, skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+    assert templates == []
+    assert skipped == 0
+
+
+def test_different_shapes_do_not_cluster_together():
+    from hate_crack import main as hc_main
+
+    plaintexts = ["Foo111", "Foo222", "Foo333!!"]  # last one has an extra symbol run
+    templates, skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+    assert templates == []  # each shape bucket only has 1-2 members
+
+
+def test_escape_mask_literal_doubles_question_marks():
+    from hate_crack import main as hc_main
+
+    assert hc_main._escape_mask_literal("CrawlingHorse") == "CrawlingHorse"
+    assert hc_main._escape_mask_literal("Pass?word") == "Pass??word"
+
+
+def test_escape_mask_literal_leaves_field_escapes_to_the_assembler():
+    r"""'\' and ',' are hcmask *field* escapes, consumed by
+    mask_ctx_parse_maskfile before the mask is tokenized, and
+    format_hcmask_line escapes both when it assembles the line. Doing it here
+    as well would double-escape: a doubled backslash for '\', and a literal
+    backslash plus a real field break for ','.
+
+    The assembled-line tests below are what actually pin the behaviour; these
+    only pin which layer owns which character.
+    """
+    from hate_crack import main as hc_main
+
+    assert hc_main._escape_mask_literal("pass\\word") == "pass\\word"
+    assert hc_main._escape_mask_literal("back\\") == "back\\"
+    assert hc_main._escape_mask_literal("a,b") == "a,b"
+    # '?' is still ours: mp_expand reads it after the field escapes are gone.
+    assert hc_main._escape_mask_literal("a\\?b") == "a\\??b"
+
+
+def test_build_hcmask_lines_backslash_literal_survives_hashcat():
+    """Pins the exact emitted line for a backslash-bearing literal.
+
+    Expectations verified with ``hashcat --stdout -a 3``: this line
+    enumerates ``pass\\word0``..``pass\\word9``. Before the fix it emitted
+    ``pass\\word?1``, which hashcat read as ``password?1`` -- a mask that can
+    never match the plaintext the cluster was built from.
+
+    This pins the *assembled* line rather than one layer's output, which is
+    what let the escaping move from ``_escape_mask_literal`` to
+    ``format_hcmask_line`` safely: the line is byte-identical either way, and
+    when the submodule bump landed with both layers still escaping, this
+    assertion failed on a doubled backslash instead of quietly corrupting the
+    mask. It guards a move back the same way.
+
+    Because it depends on the pinned HashcatRosetta commit, a submodule
+    working tree left behind an updated pin fails here too -- run
+    ``git submodule update --init HashcatRosetta`` if it does.
+    """
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "pass\\word"),),
+        variable_positions=(1,),
+        variable_charsets=("0123456789",),
+        length_combinations=((1,),),
+        member_count=3,
+        total_positions=2,
+    )
+    assert hc_main._build_hcmask_lines(template) == ["pass\\\\word?d"]
+
+
+def test_build_hcmask_lines_backslash_and_comma_and_question_mark():
+    """All three special characters in one literal, each escaped by whichever
+    layer owns it: '\\' and '?' here, ',' by format_hcmask_line."""
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "S", "a\\b,c?d"),),
+        variable_positions=(1,),
+        variable_charsets=("0123456789",),
+        length_combinations=((1,),),
+        member_count=3,
+        total_positions=2,
+    )
+    # hashcat: field parse -> "a\b,c??d?1", mask expand -> literal "a\b,c?d" + digit.
+    assert hc_main._build_hcmask_lines(template) == ["a\\\\b\\,c??d?d"]
+
+
+def test_build_hcmask_lines_single_length_combination():
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "CrawlingHorse"),),
+        variable_positions=(1,),
+        variable_charsets=("0123456789",),
+        length_combinations=((3,),),
+        member_count=4,
+        total_positions=2,
+    )
+    assert hc_main._build_hcmask_lines(template) == ["CrawlingHorse?d?d?d"]
+
+
+def test_build_hcmask_lines_multiple_length_combinations_produce_multiple_lines():
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=(
+            (0, "L", "ChangeMe"),
+            (1, "D", "2"),
+            (2, "L", "day"),
+        ),
+        variable_positions=(3, 4),
+        variable_charsets=("0123456789", "!@#$%^&*()"),
+        length_combinations=((4, 2), (4, 3)),
+        member_count=11,
+        total_positions=5,
+    )
+    assert hc_main._build_hcmask_lines(template) == [
+        "!@#$%^&*(),ChangeMe2day?d?d?d?d?1?1",
+        "!@#$%^&*(),ChangeMe2day?d?d?d?d?1?1?1",
+    ]
+
+
+def test_build_hcmask_lines_escapes_literal_question_mark_in_fixed_run():
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "S", "Pass?word"),),
+        variable_positions=(1,),
+        variable_charsets=("0123456789",),
+        length_combinations=((2,),),
+        member_count=3,
+        total_positions=2,
+    )
+    assert hc_main._build_hcmask_lines(template) == ["Pass??word?d?d"]
+
+
+def test_builtin_token_table_matches_rosetta():
+    """The local builtin table must stay identical to hashcat's own, as
+    HashcatRosetta transcribes it.
+
+    main.py keeps its own copy so the table survives the optional-import
+    path (a missing submodule must not turn into a NameError halfway
+    through mask building), which makes drift possible -- this is the guard
+    against it.
+    """
+    from hate_crack import main as hc_main  # noqa: F401  (puts rosetta on sys.path)
+    from hashcat_rosetta.mask import BUILTIN_CHARSETS
+
+    assert hc_main._SMART_MASK_BUILTIN_TOKENS == {
+        frozenset(charset): token for token, charset in BUILTIN_CHARSETS.items()
+    }
+
+
+@pytest.mark.parametrize(
+    ("charset", "token"),
+    [
+        ("0123456789", "?d"),
+        ("abcdefghijklmnopqrstuvwxyz", "?l"),
+        ("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "?u"),
+        ("0123456789abcdef", "?h"),
+        ("0123456789ABCDEF", "?H"),
+        (" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", "?s"),
+        (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            " !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~",
+            "?a",
+        ),
+        ("".join(chr(i) for i in range(256)), "?b"),
+    ],
+)
+def test_builtin_charsets_use_their_token_and_take_no_slot(charset, token):
+    """A charset hashcat already has a token for is written as that token.
+
+    Same keyspace, a shorter line, and -- the reason it matters -- one more
+    of the eight ?1-?8 slots left for a charset that genuinely needs one.
+    """
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "stem"),),
+        variable_positions=(1,),
+        variable_charsets=(charset,),
+        length_combinations=((2,),),
+        member_count=3,
+        total_positions=2,
+    )
+    assert hc_main._build_hcmask_lines(template) == [f"stem{token}{token}"]
+
+
+def test_builtin_match_ignores_charset_ordering():
+    """_infer_charset returns observed characters sorted, so the match has to
+    be on the character set, not the string hashcat happens to write."""
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "stem"),),
+        variable_positions=(1,),
+        variable_charsets=("9876543210",),
+        length_combinations=((1,),),
+        member_count=3,
+        total_positions=2,
+    )
+    assert hc_main._build_hcmask_lines(template) == ["stem?d"]
+
+
+def test_single_character_charset_becomes_a_literal():
+    """A run that varies only in length has a one-character charset. Inlining
+    it costs nothing and frees the slot it would otherwise hold."""
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "stem"),),
+        variable_positions=(1,),
+        variable_charsets=("#",),
+        length_combinations=((1,), (3,)),
+        member_count=3,
+        total_positions=2,
+    )
+    assert hc_main._build_hcmask_lines(template) == ["stem#", "stem###"]
+
+
+def test_single_character_charset_literal_is_escaped():
+    """An inlined '?' is a mask token marker and must be doubled, exactly as a
+    fixed-run literal is."""
+    from hate_crack import main as hc_main
+    from hashcat_rosetta import mask as rosetta_mask
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "stem"),),
+        variable_positions=(1,),
+        variable_charsets=("?",),
+        length_combinations=((2,),),
+        member_count=3,
+        total_positions=2,
+    )
+    (line,) = hc_main._build_hcmask_lines(template)
+    assert line == "stem????"
+    assert rosetta_mask.parse_hcmask_line(line).mask == "stem????"
+
+
+def test_builtin_substitution_preserves_keyspace():
+    """The rewrite must be exactly equivalent -- same candidates, same count."""
+    from hate_crack import main as hc_main
+    from hashcat_rosetta import mask as rosetta_mask
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "stem"),),
+        variable_positions=(1, 2),
+        variable_charsets=("0123456789", "#"),
+        length_combinations=((3, 2),),
+        member_count=3,
+        total_positions=3,
+    )
+    (line,) = hc_main._build_hcmask_lines(template)
+    assert line == "stem?d?d?d##"
+    explicit = rosetta_mask.parse_hcmask_line("0123456789,#,stem?1?1?1?2?2")
+    assert rosetta_mask.keyspace(rosetta_mask.parse_hcmask_line(line)) == (
+        rosetta_mask.keyspace(explicit)
+    )
+
+
+def test_builtins_do_not_count_against_the_slot_limit():
+    """Eight genuinely custom charsets plus any number of builtin ones still
+    builds -- before this, the digit runs alone could exhaust the slots and
+    drop the whole template."""
+    from hate_crack import main as hc_main
+    from hashcat_rosetta import mask as rosetta_mask
+
+    charsets = tuple("abcdefgh"[i] * 2 + "z" for i in range(8)) + ("0123456789",) * 4
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=tuple((i, "L", "x") for i in range(0, 24, 2)),
+        variable_positions=tuple(range(1, 24, 2)),
+        variable_charsets=charsets,
+        length_combinations=((1,) * 12,),
+        member_count=3,
+        total_positions=24,
+    )
+    (line,) = hc_main._build_hcmask_lines(template)
+    parsed = rosetta_mask.parse_hcmask_line(line)
+    assert len(parsed.custom) == 8
+    assert parsed.mask.endswith("x?dx?dx?dx?d")
+
+
+def test_identical_charsets_share_one_slot():
+    """Nine varying runs over the same charset need one ?1, not nine slots.
+
+    ``?1`` repeated at several positions enumerates exactly what several
+    identically-defined slots would, so sharing is free -- and it is what stops
+    hashcat's eight-slot ceiling from acting as a ceiling on varying runs.
+    The charset here is deliberately not a hashcat builtin: a builtin would
+    take no slot at all and so would not exercise sharing.
+    """
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=tuple((i, "L", "x") for i in range(0, 18, 2)),
+        variable_positions=tuple(range(1, 18, 2)),
+        variable_charsets=("0246",) * 9,
+        length_combinations=((1,) * 9,),
+        member_count=3,
+        total_positions=18,
+    )
+    lines = hc_main._build_hcmask_lines(template)
+    assert lines == ["0246," + "x?1" * 9]
+
+
+def test_slot_sharing_preserves_per_position_charsets():
+    """Sharing must key on the charset, not collapse distinct ones together."""
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "a"), (2, "L", "b"), (4, "L", "c")),
+        variable_positions=(1, 3, 5),
+        variable_charsets=("0246", "abc", "0246"),
+        length_combinations=((1, 1, 1),),
+        member_count=3,
+        total_positions=6,
+    )
+    assert hc_main._build_hcmask_lines(template) == ["0246,abc,a?1b?2c?1"]
+
+
+def test_nine_distinct_charsets_raise_the_slot_limit():
+    from hate_crack import main as hc_main
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=tuple((i, "L", "x") for i in range(0, 18, 2)),
+        variable_positions=tuple(range(1, 18, 2)),
+        variable_charsets=tuple("abcdefghi"[i] * 2 + "z" for i in range(9)),
+        length_combinations=((1,) * 9,),
+        member_count=3,
+        total_positions=18,
+    )
+    with pytest.raises(hc_main.SmartMaskSlotLimit) as excinfo:
+        hc_main._build_hcmask_lines(template)
+    assert excinfo.value.needed == 9
+
+
+def test_eight_distinct_charsets_still_build():
+    """Eight is allowed, so the guard must not be off by one."""
+    from hate_crack import main as hc_main
+    from hashcat_rosetta.mask import parse_hcmask_line
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=tuple((i, "L", "x") for i in range(0, 16, 2)),
+        variable_positions=tuple(range(1, 16, 2)),
+        variable_charsets=tuple("abcdefgh"[i] * 2 + "z" for i in range(8)),
+        length_combinations=((1,) * 8,),
+        member_count=3,
+        total_positions=16,
+    )
+    (line,) = hc_main._build_hcmask_lines(template)
+    parsed = parse_hcmask_line(line)
+    assert len(parsed.custom) == 8
+    assert parsed.mask == "".join(f"x?{n}" for n in range(1, 9))
+
+
+def test_build_hcmask_lines_output_parses_as_valid_hcmask():
+    """Every generated line must round-trip through HashcatRosetta's own
+    parser -- this is the same grammar hashcat's -a3 mode expects."""
+    from hate_crack import main as hc_main
+    from hashcat_rosetta.mask import parse_hcmask_line
+
+    template = hc_main._SmartMaskTemplate(
+        fixed_runs=((0, "L", "CrawlingHorse"),),
+        variable_positions=(1,),
+        variable_charsets=("0123456789",),
+        length_combinations=((3,),),
+        member_count=4,
+        total_positions=2,
+    )
+    for line in hc_main._build_hcmask_lines(template):
+        parsed = parse_hcmask_line(line)
+        assert parsed.mask == "CrawlingHorse?d?d?d"
+
+
+def _only_template(hc_main, plaintexts):
+    templates, _skipped = hc_main._cluster_smart_mask_templates(
+        plaintexts, min_cluster_size=3
+    )
+    assert len(templates) == 1, templates
+    return templates[0]
+
+
+def test_template_attack_mode_trailing_variation_is_a6():
+    from hate_crack import main as hc_main
+
+    template = _only_template(
+        hc_main, ["CrawlingHorse432", "CrawlingHorse559", "CrawlingHorse134"]
+    )
+    assert hc_main._template_attack_mode(template) == "6"
+
+
+def test_template_attack_mode_leading_variation_is_a7():
+    """-a 6 and -a 7 enumerate disjoint candidate sets, so which end varies
+    decides the mode -- getting it backwards would try the mask on the wrong
+    side of every stem."""
+    from hate_crack import main as hc_main
+
+    template = _only_template(
+        hc_main, ["432CrawlingHorse", "559CrawlingHorse", "134CrawlingHorse"]
+    )
+    assert hc_main._template_attack_mode(template) == "7"
+
+
+def test_template_attack_mode_interior_variation_still_splits():
+    """A hybrid mask is a full mask, so it can hold the trailing literal too.
+
+    Only one end has to be fixed for a split to exist -- getting this wrong is
+    what makes the -a 3 fallback look far more common than it is.
+    """
+    from hate_crack import main as hc_main
+
+    template = _only_template(hc_main, ["Winter1Storm", "Winter2Storm", "Winter3Storm"])
+    assert hc_main._template_attack_mode(template) == "6"
+    assert hc_main._template_stem(template) == "Winter"
+    assert hc_main._template_hybrid_masks(template) == [((), "?dStorm")]
+
+
+def test_template_attack_mode_stays_a3_when_both_ends_vary():
+    """With variation at both ends there is no contiguous fixed run to seed a
+    wordlist with, so the literal has to stay inside the mask."""
+    from hate_crack import main as hc_main
+
+    template = _only_template(hc_main, ["1Winter2", "2Winter3", "3Winter4"])
+    assert hc_main._template_attack_mode(template) == "3"
+
+
+def test_template_stem_is_unescaped_for_a_wordlist():
+    """The stem goes in a wordlist, where hashcat reads bytes literally, so a
+    '?' must stay single. Doubling it the way mask context requires would make
+    hashcat hunt for a literal '??'."""
+    from hate_crack import main as hc_main
+
+    template = _only_template(hc_main, ["Pa?ss432", "Pa?ss559", "Pa?ss134"])
+    assert hc_main._template_stem(template) == "Pa?ss"
+    # ...while the -a 3 rendering of the same template still escapes it.
+    assert hc_main._build_hcmask_lines(template) == ["Pa??ss?d?d?d"]
+
+
+def test_template_hybrid_masks_omit_the_fixed_runs():
+    """One (charsets, mask) pair per length combination, covering only the
+    variable runs -- the fixed text travels in the wordlist instead."""
+    from hate_crack import main as hc_main
+
+    template = _only_template(
+        hc_main,
+        ["ChangeMe2day1624$!", "ChangeMe2day1625#&*", "ChangeMe2day1924!**"],
+    )
+    assert hc_main._template_hybrid_masks(template) == [
+        (("!@#$%^&*()",), "?d?d?d?d?1?1"),
+        (("!@#$%^&*()",), "?d?d?d?d?1?1?1"),
+    ]
+
+
+def _install_smart_mask_test_env(monkeypatch, hc_main, hashfile):
+    monkeypatch.setenv("HATE_CRACK_SKIP_INIT", "1")
+    monkeypatch.setattr(hc_main, "hcatHashCracked", 0)
+    monkeypatch.setattr(hc_main, "hcatHashFile", str(hashfile))
+    monkeypatch.setattr(hc_main, "generate_session_id", lambda *_: "test_session")
+    monkeypatch.setattr(hc_main, "hcatBin", "hashcat")
+    monkeypatch.setattr(hc_main, "hcatTuning", "")
+    monkeypatch.setattr(hc_main, "hcatPotfilePath", "")
+
+
+class _NoopPopen:
+    """Popen stand-in for hashcat invocations: records the command, never
+    actually runs anything.
+
+    ``hcmask_snapshots`` and ``words_snapshots``, when given a list, get the
+    raw bytes of any ``.hcmask`` / ``.words`` file argument at invocation time
+    -- hcatSmartMask deletes those files once its attacks finish, so a test
+    asserting on their content must capture it here rather than reading the
+    path after the call.
+    """
+
+    def __init__(self, seen, hcmask_snapshots=None, words_snapshots=None):
+        self.seen = seen
+        self.hcmask_snapshots = hcmask_snapshots
+        self.words_snapshots = words_snapshots
+
+    def __call__(self, args, **_kwargs):
+        import os
+
+        self.seen.append(list(args))
+        for suffix, sink in (
+            (".hcmask", self.hcmask_snapshots),
+            (".words", self.words_snapshots),
+        ):
+            if sink is None:
+                continue
+            for arg in args:
+                if (
+                    isinstance(arg, str)
+                    and arg.endswith(suffix)
+                    and os.path.isfile(arg)
+                ):
+                    with open(arg, "rb") as f:
+                        sink.append(f.read())
+        return self._Proc()
+
+    class _Proc:
+        pid = 4321
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            return None
+
+
+def _hybrid_positionals(cmd):
+    """The two positional arguments of a hybrid command, in argv order.
+
+    They cannot be read off the end of the list: -O, the tuning flags and
+    --potfile-path are all appended after them.
+    """
+    index = next(i for i, arg in enumerate(cmd) if arg.endswith(".words"))
+    start = index if cmd[cmd.index("-a") + 1] == "6" else index - 1
+    return cmd[start], cmd[start + 1]
+
+
+def _hybrid_mask(cmd):
+    """The mask argument of a hybrid command, whichever side it sits on."""
+    first, second = _hybrid_positionals(cmd)
+    return second if first.endswith(".words") else first
+
+
+def test_hcatSmartMask_runs_a_trailing_variation_cluster_as_a_hybrid_attack(
+    monkeypatch, tmp_path
+):
+    """A cluster that varies only at the end becomes -a 6: the stem travels in
+    a wordlist and the mask is hashcat's per-word amplifier.
+
+    As an -a 3 line (``CrawlingHorse?d?d?d``) this was 1000 candidates against
+    a device asking for millions of base words, and hashcat said so on stderr
+    every run.
+    """
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\nd:CrawlingHorse795\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 4)
+
+    popen_calls = []
+    words_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess,
+        "Popen",
+        _NoopPopen(popen_calls, words_snapshots=words_snapshots),
+    )
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1
+    cmd = popen_calls[0]
+    assert cmd[cmd.index("-a") + 1] == "6"
+    # -a 6 is wordlist-then-mask; the order is what tells hashcat to append.
+    words, mask = _hybrid_positionals(cmd)
+    assert words.endswith(".words")
+    assert mask == "?d?d?d"
+    assert words_snapshots == [b"CrawlingHorse\n"]
+    assert hc_main.hcatSmartMaskCount == 4  # lineCount(...) - hcatHashCracked(0)
+
+
+def test_hcatSmartMask_runs_a_leading_variation_cluster_as_a7(monkeypatch, tmp_path):
+    """Variation at the *front* prepends the mask instead, which enumerates a
+    disjoint candidate set from -a 6 and so must not collapse onto it."""
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:432CrawlingHorse\nb:559CrawlingHorse\nc:134CrawlingHorse\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    words_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess,
+        "Popen",
+        _NoopPopen(popen_calls, words_snapshots=words_snapshots),
+    )
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1
+    cmd = popen_calls[0]
+    assert cmd[cmd.index("-a") + 1] == "7"
+    mask, words = _hybrid_positionals(cmd)
+    assert mask == "?d?d?d"
+    assert words.endswith(".words")
+    assert words_snapshots == [b"CrawlingHorse\n"]
+
+
+def test_hcatSmartMask_collapses_templates_that_share_a_mask_into_one_run(
+    monkeypatch, tmp_path
+):
+    """Two unrelated clusters that vary the same way must become ONE hashcat
+    invocation with both stems in its wordlist.
+
+    This is the collapse the attack exists to do. As -a 3 lines the two were
+    ``CrawlingHorse?d?d?d`` and ``ChangeMe?d?d?d`` -- separate lines, separate
+    autotunes, 1000 candidates each, and no way to merge them, because a mask
+    line's literal *is* its identity.
+    """
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+        "d:ChangeMe240\ne:ChangeMe371\nf:ChangeMe815\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 6)
+
+    popen_calls = []
+    words_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess,
+        "Popen",
+        _NoopPopen(popen_calls, words_snapshots=words_snapshots),
+    )
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1, "same mask and mode must mean one invocation"
+    assert _hybrid_mask(popen_calls[0]) == "?d?d?d"
+    assert words_snapshots == [b"CrawlingHorse\nChangeMe\n"]
+
+
+def test_hcatSmartMask_keeps_different_masks_in_separate_runs(monkeypatch, tmp_path):
+    """Collapsing is by mask, not by mode: a three-digit and a two-digit
+    suffix enumerate different candidate sets and cannot share a run."""
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+        "d:ChangeMe24\ne:ChangeMe37\nf:ChangeMe81\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 6)
+
+    popen_calls = []
+    words_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess,
+        "Popen",
+        _NoopPopen(popen_calls, words_snapshots=words_snapshots),
+    )
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 2
+    assert [_hybrid_mask(cmd) for cmd in popen_calls] == ["?d?d?d", "?d?d"]
+    assert words_snapshots == [b"CrawlingHorse\n", b"ChangeMe\n"]
+
+
+def test_hcatSmartMask_does_not_widen_a_collapsed_hybrid_mask(monkeypatch, tmp_path):
+    """Widening is only for what could not be collapsed.
+
+    A collapsed group already gives hashcat a full wordlist to amplify, so
+    broadening ?d to ?a there would multiply the work by ~10^4 per position
+    without the parallelism problem that justifies it.
+    """
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert _hybrid_mask(popen_calls[0]) == "?d?d?d", (
+        "a collapsed mask must stay as inferred"
+    )
+
+
+def test_hcatSmartMask_widens_a_template_that_cannot_collapse(monkeypatch, tmp_path):
+    """Variation at *both* ends leaves no fixed run to seed a wordlist, so the
+    template stays -a 3 and gets its charsets widened instead -- the only lever
+    left once collapsing is unavailable."""
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text("a:1Winter2\nb:2Winter3\nc:3Winter4\n")
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    hcmask_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess, "Popen", _NoopPopen(popen_calls, hcmask_snapshots)
+    )
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1
+    cmd = popen_calls[0]
+    assert cmd[cmd.index("-a") + 1] == "3"
+    assert hcmask_snapshots == [b"?aWinter?a\n"], "?d should have widened to ?a"
+
+
+def test_hcatSmartMask_widening_never_breaches_the_keyspace_guardrail(
+    monkeypatch, tmp_path
+):
+    """A guardrail too tight for the widened form must leave the template as
+    inferred, not drop it. Widening is an optimisation; turning a template
+    that would have run into one that gets skipped would be a regression."""
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text("a:1Winter2\nb:2Winter3\nc:3Winter4\n")
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    hcmask_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess, "Popen", _NoopPopen(popen_calls, hcmask_snapshots)
+    )
+
+    # ?a?a is 95**2 = 9025 candidates and ?d?d is 100, so a limit of 500
+    # admits only the narrower form.
+    hc_main.hcatSmartMask("1000", str(hashfile), keyspace_limit=500)
+
+    assert hcmask_snapshots == [b"?dWinter?d\n"]
+
+
+def test_hcatSmartMask_removes_the_stem_wordlists_after_the_attack(
+    monkeypatch, tmp_path
+):
+    import glob
+
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+        "d:ChangeMe24\ne:ChangeMe37\nf:ChangeMe81\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 6)
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen([]))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert glob.glob(str(hashfile) + ".smartmask.*") == []
+
+
+def test_hcatSmartMask_removes_the_hcmask_file_after_the_attack(monkeypatch, tmp_path):
+    import os
+
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1  # the attack did run
+    assert not os.path.exists(tmp_path / "hashes.txt.smartmask.hcmask")
+
+
+def test_smartmask_hcmask_file_removed_by_cleanup(tmp_path, monkeypatch):
+    """Mirrors test_main_spoonman.test_cleanup_removes_derived_output: a
+    belt-and-braces backstop for the case where hcatSmartMask's own cleanup
+    never ran (e.g. the process was killed mid-attack)."""
+    import os
+
+    import hate_crack.main as hc_main
+
+    hash_file = str(tmp_path / "hashes.txt")
+    hcmask_path = hash_file + ".smartmask.hcmask"
+    with open(hcmask_path, "w") as f:
+        f.write("0123456789,CrawlingHorse?1?1?1\n")
+
+    monkeypatch.setattr(hc_main, "hcatHashFile", hash_file)
+    monkeypatch.setattr(hc_main, "hcatHashFileOrig", hash_file)
+    monkeypatch.setattr(hc_main, "hcatHashType", "1000")
+    monkeypatch.setattr(hc_main, "pwdump_format", False)
+    hc_main.cleanup()
+
+    assert not os.path.exists(hcmask_path)
+
+
+def test_hcatSmartMask_keyspace_guard_only_excludes_the_oversized_template(
+    monkeypatch, tmp_path, capsys
+):
+    """One oversized template among several must be dropped while the rest
+    still run."""
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+        "d:ChangeMe24\ne:ChangeMe37\nf:ChangeMe81\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 6)
+
+    popen_calls = []
+    words_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess,
+        "Popen",
+        _NoopPopen(popen_calls, words_snapshots=words_snapshots),
+    )
+
+    # CrawlingHorse's ?d?d?d is 10**3 = 1000 candidates; a limit of 500
+    # excludes it while admitting ChangeMe's ?d?d (10**2 = 100 candidates).
+    hc_main.hcatSmartMask("1000", str(hashfile), keyspace_limit=500)
+
+    assert "exceeds the 500-candidate guardrail" in capsys.readouterr().out
+    assert len(popen_calls) == 1
+    assert _hybrid_mask(popen_calls[0]) == "?d?d"
+    assert words_snapshots == [b"ChangeMe\n"]
+
+
+def test_hcatSmartMask_no_qualifying_cluster_skips_hashcat(
+    monkeypatch, tmp_path, capsys
+):
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text("a:onlyone123\n")
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 1)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert popen_calls == []
+    assert "no qualifying clusters found" in capsys.readouterr().out
+
+
+def test_hcatSmartMask_uses_configured_min_cluster_size(monkeypatch, tmp_path):
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text("a:CrawlingHorse432\nb:CrawlingHorse559\n")
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 2)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    # The built-in default (_SMART_MASK_MIN_CLUSTER_SIZE == 3) would reject
+    # this 2-member cluster; the configured override lets it through.
+    monkeypatch.setattr(hc_main, "hcatSmartMaskMinClusterSize", 2)
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1
+
+
+def test_hcatSmartMask_decodes_hex_wrapped_plaintext(monkeypatch, tmp_path):
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    hex_plain = "CrawlingHorse432".encode("iso-8859-9").hex()
+    (tmp_path / "hashes.txt.out").write_text(
+        f"h0:$HEX[{hex_plain}]\nh1:CrawlingHorse559\nh2:CrawlingHorse134\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert len(popen_calls) == 1  # the $HEX[...] entry still joined the cluster
+
+
+def test_hcatSmartMask_stem_wordlist_preserves_high_bytes_from_hex_wrapper(
+    monkeypatch, tmp_path
+):
+    """A cracked plaintext containing a byte >= 0x80 (why hashcat had to
+    $HEX[...]-wrap it in the first place) must reach the file hashcat reads as
+    that exact byte. Writing it as UTF-8 would re-encode it into a different,
+    multi-byte sequence that hashcat would never match. The destination is now
+    the stem wordlist rather than the .hcmask file, since a trailing-variation
+    cluster collapses into a hybrid run -- the encoding trap is identical."""
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    plain_stem = "Sömmer"  # "ö" (U+00F6) -> single byte 0xF6 in latin-1
+    hex_lines = "\n".join(
+        f"h{i}:$HEX[{(plain_stem + digits).encode('latin-1').hex()}]"
+        for i, digits in enumerate(["432", "559", "134"])
+    )
+    (tmp_path / "hashes.txt.out").write_text(hex_lines + "\n")
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    words_snapshots = []
+    monkeypatch.setattr(
+        hc_main.subprocess,
+        "Popen",
+        _NoopPopen(popen_calls, words_snapshots=words_snapshots),
+    )
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    raw_bytes = words_snapshots[0]
+    assert b"S\xf6mmer" in raw_bytes  # the original single byte, not UTF-8's \xc3\xb6
+    assert b"\xc3\xb6" not in raw_bytes
+
+
+def test_hcatSmartMask_keyspace_guard_skips_oversized_template(
+    monkeypatch, tmp_path, capsys
+):
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile), keyspace_limit=1)
+
+    assert popen_calls == []
+    assert "exceeds the 1-candidate guardrail" in capsys.readouterr().out
+
+
+def test_hcatSmartMask_prints_warning_when_rosetta_unavailable(
+    monkeypatch, tmp_path, capsys
+):
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "a:CrawlingHorse432\nb:CrawlingHorse559\nc:CrawlingHorse134\n"
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+    monkeypatch.setattr(hc_main, "rosetta_parse_hcmask_line", None)
+    monkeypatch.setattr(hc_main, "rosetta_format_hcmask_line", None)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert popen_calls == []
+    assert "HashcatRosetta is unavailable" in capsys.readouterr().out
+
+
+def test_hcatSmartMask_reports_skipped_all_digit_stems(monkeypatch, tmp_path, capsys):
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text("a:111222\nb:333444\nc:555666\n")
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    assert popen_calls == []
+    out = capsys.readouterr().out
+    assert "skipping 3 plaintext(s) with no alphabetic stem" in out
+
+
+def test_smart_mask_crack_default_keyspace_limit_passes_none(monkeypatch):
+    import builtins
+    from types import SimpleNamespace
+    from hate_crack import attacks
+
+    seen = {}
+
+    def fake_hcatSmartMask(hash_type, hash_file, **kwargs):
+        seen["hash_type"] = hash_type
+        seen["hash_file"] = hash_file
+        seen["keyspace_limit"] = kwargs.get("keyspace_limit")
+
+    ctx = SimpleNamespace(
+        hcatHashType="1000",
+        hcatHashFile="dummy.hash",
+        hcatSmartMask=fake_hcatSmartMask,
+    )
+
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "")
+    attacks.smart_mask_crack(ctx)
+
+    assert seen["hash_type"] == "1000"
+    assert seen["hash_file"] == "dummy.hash"
+    assert seen["keyspace_limit"] is None
+
+
+def test_smart_mask_crack_custom_keyspace_limit(monkeypatch):
+    import builtins
+    from types import SimpleNamespace
+    from hate_crack import attacks
+
+    seen = {}
+
+    def fake_hcatSmartMask(hash_type, hash_file, **kwargs):
+        seen["keyspace_limit"] = kwargs.get("keyspace_limit")
+
+    ctx = SimpleNamespace(
+        hcatHashType="1000", hcatHashFile="dummy.hash", hcatSmartMask=fake_hcatSmartMask
+    )
+
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "12345")
+    attacks.smart_mask_crack(ctx)
+
+    assert seen["keyspace_limit"] == 12345
+
+
+def test_smart_mask_crack_zero_keyspace_limit_warns_no_limit(monkeypatch, capsys):
+    import builtins
+    from types import SimpleNamespace
+    from hate_crack import attacks
+
+    seen = {}
+
+    def fake_hcatSmartMask(hash_type, hash_file, **kwargs):
+        seen["keyspace_limit"] = kwargs.get("keyspace_limit")
+
+    ctx = SimpleNamespace(
+        hcatHashType="1000", hcatHashFile="dummy.hash", hcatSmartMask=fake_hcatSmartMask
+    )
+
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "0")
+    attacks.smart_mask_crack(ctx)
+
+    assert seen["keyspace_limit"] == 0
+    assert "No limit" in capsys.readouterr().out
+
+
+def test_smart_mask_crack_rejects_negative_then_accepts_blank(monkeypatch):
+    import builtins
+    from types import SimpleNamespace
+    from hate_crack import attacks
+
+    seen = {}
+
+    def fake_hcatSmartMask(hash_type, hash_file, **kwargs):
+        seen["keyspace_limit"] = kwargs.get("keyspace_limit")
+
+    ctx = SimpleNamespace(
+        hcatHashType="1000", hcatHashFile="dummy.hash", hcatSmartMask=fake_hcatSmartMask
+    )
+
+    responses = iter(["-5", ""])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(responses))
+    attacks.smart_mask_crack(ctx)
+
+    assert seen["keyspace_limit"] is None
+
+
+def test_hcatSmartMask_reports_a_slot_exhausted_template_instead_of_dropping_it_quietly(
+    monkeypatch, tmp_path, capsys
+):
+    """Nine runs of nine *different* charsets cannot be expressed at all.
+
+    Before the guard this surfaced as an opaque "unbuildable template" from the
+    mask parser, with nothing naming the cause; the whole cluster went missing
+    for a reason the operator could not act on.
+    """
+    import hate_crack.main as hc_main
+
+    importlib.reload(hc_main)
+
+    # Nine varying runs, each drawing on a different alphabet, separated by
+    # fixed letter runs so the shape signature stays stable across members.
+    #
+    # Each alphabet deliberately mixes a digit with a symbol. A same-class pair
+    # like "01" no longer reaches the slot allocator at all: _infer_charset
+    # widens it to ?d, a builtin that costs no slot. Only a set that is a
+    # subset of no known alphabet -- and, once widened, of nothing narrower
+    # than ?a -- still needs a slot of its own.
+    # No ':' -- these go through a hash:plaintext .out file. No ',' or '\'
+    # either: those are hcmask field escapes, and no '?', which is the mask
+    # token marker.
+    alphabets = ["-_", "=+", "[]", "{}", ";'", '"<', ">/", "~`", "|."]
+    members = []
+    for pick in range(2):
+        parts = []
+        for index, alphabet in enumerate(alphabets):
+            parts.append(chr(ord("a") + index))
+            parts.append(alphabet[pick])
+        members.append("".join(parts))
+    members.append(members[0][:-1] + alphabets[-1][0])
+
+    hashfile = tmp_path / "hashes.txt"
+    (tmp_path / "hashes.txt.out").write_text(
+        "".join(f"{i}:{m}\n" for i, m in enumerate(members))
+    )
+    _install_smart_mask_test_env(monkeypatch, hc_main, hashfile)
+    monkeypatch.setattr(hc_main, "lineCount", lambda _p: 3)
+
+    popen_calls = []
+    monkeypatch.setattr(hc_main.subprocess, "Popen", _NoopPopen(popen_calls))
+
+    hc_main.hcatSmartMask("1000", str(hashfile))
+
+    out = capsys.readouterr().out
+    assert "charset slots" in out, out
+    assert "9 distinct charsets" in out, out
+    assert popen_calls == [], "an inexpressible template must not launch hashcat"
+
+
+def test_assign_mask_tokens_escapes_a_question_mark_in_a_charset_definition():
+    r"""A charset *definition* is tokenized by mp_expand too, so a bare '?' in
+    one is a dangling token: hashcat rejects ``-1 '!#?'`` with "Syntax error in
+    mask".
+
+    Where that lands decides the cost. Inside an .hcmask file hashcat reports
+    the bad line and still runs every other line; on argv it exits 255 having
+    tried nothing -- and one argv invocation now carries a whole group of
+    stems, so an unescaped '?' would lose all of them.
+    """
+    from hate_crack import main as hc_main
+
+    charsets, tokens = hc_main._assign_mask_tokens(("!#?",))
+    assert charsets == ["!#??"]
+    assert tokens == ["?1"]
+
+
+def test_widening_never_drops_an_observed_non_ascii_byte():
+    """?a is printable ASCII only, so a run that observed a high byte -- the
+    case latin-1 handling and convert_hex exist for -- must not be widened to
+    it. Doing so would drop a character the cluster demonstrably contains,
+    making a "widening" a silent narrowing."""
+    from hate_crack import main as hc_main
+
+    # 0xa9 in a symbol run at both ends, so the template stays -a 3 residual.
+    template = _only_template(hc_main, ["\xa9Mid!", "!Mid\xa9", "#Mid#"])
+    assert hc_main._template_attack_mode(template) == "3"
+
+    widened = hc_main._widen_template_charsets(
+        template, hc_main._SMART_MASK_KEYSPACE_LIMIT
+    )
+    for observed, chosen in zip(template.variable_charsets, widened.variable_charsets):
+        assert set(observed) <= set(chosen), (observed, chosen)
+
+
+def test_build_hcmask_lines_escapes_a_leading_hash():
+    r"""hashcat reads an .hcmask line starting with '#' as a comment, and the
+    loss is silent -- every other line in the file still runs and the exit
+    status is 0, so the template simply never gets tried.
+
+    Reachable two ways: a mask whose first fixed literal begins with '#', and a
+    custom-charset field, since _infer_charset returns sorted characters and
+    '#' sorts ahead of everything but '!' and '"'.
+    """
+    from hate_crack import main as hc_main
+
+    template = _only_template(hc_main, ["#ab1", "#ab22", "#ab333"])
+    assert hc_main._build_hcmask_lines(template) == [
+        "\\#ab?d",
+        "\\#ab?d?d",
+        "\\#ab?d?d?d",
+    ]
+
+
+def test_guard_hcmask_comment_leaves_other_lines_alone():
+    """The escape is only ever prepended to a line that starts with '#', so it
+    cannot collide with the '\\\\' that rosetta emits for a literal backslash."""
+    from hate_crack import main as hc_main
+
+    assert hc_main._guard_hcmask_comment("abc?d") == "abc?d"
+    assert hc_main._guard_hcmask_comment("\\\\abc?d") == "\\\\abc?d"
+    assert hc_main._guard_hcmask_comment("#abc?d") == "\\#abc?d"

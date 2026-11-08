@@ -1,0 +1,25 @@
+[submodule "hashcat-utils"]
+	path = hashcat-utils
+	url = https://github.com/hashcat/hashcat-utils.git
+	ignore = dirty
+[submodule "HashcatRosetta"]
+	path = HashcatRosetta
+	url = https://github.com/bandrel/HashcatRosetta.git
+	ignore = dirty
+	branch = main
+[submodule "omen"]
+	path = omen
+	url = https://github.com/RUB-SysSec/OMEN.git
+	ignore = dirty
+[submodule "princeprocessor"]
+	path = princeprocessor
+	url = https://github.com/hashcat/princeprocessor.git
+	ignore = dirty
+[submodule "pcfg_cracker"]
+	path = pcfg_cracker
+	url = https://github.com/lakiw/pcfg_cracker.git
+	ignore = dirty
+[submodule "Corporate_Masks"]
+	path = Corporate_Masks
+	url = https://github.com/golem445/Corporate_Masks.git
+	ignore = dirty

@@ -1,0 +1,493 @@
+"""_run_upgrade() against real git repositories.
+
+The rest of the upgrade coverage in test_version_check.py mocks subprocess.run
+wholesale, so it only asserts which command strings get built -- a mocked
+`git pull` always "succeeds". That is why a clone whose history had been
+rewritten could dead-end `--update` in the field while the suite stayed green.
+These tests run the actual git commands instead, so a command that cannot work
+on a real repository fails here.
+
+The scenario reproduced is the 2026-07-25 purge of CLAUDE.md/.claude/docs from
+published history: every commit got a new SHA, so a clone predating it shares no
+ancestor with origin and holds tags pointing at objects origin no longer has.
+"""
+
+import os
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+
+def _git(*args, cwd, check=True):
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def _init(path):
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("config", "user.email", "t@example.com", cwd=path)
+    _git("config", "user.name", "Test", cwd=path)
+    # Global and system git config are masked by _isolate_git_config fixture,
+    # ensuring this repo sees only local config. A developer's pull.rebase=true
+    # silently changes the scenario under test (a plain pull that diverges).
+    return path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_git_config(monkeypatch):
+    """Mask global and system git config to isolate tests from developer settings.
+
+    A developer's ~/.gitconfig or /etc/gitconfig (especially pull.rebase=true)
+    would silently change the expected behavior of `git pull` in the
+    test repositories. This fixture masks both using environment variables
+    so tests see only the local config set by _init().
+    """
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+def test_isolate_git_config_fixture_is_load_bearing(tmp_path):
+    """Regression guard: disabling _isolate_git_config fails on this machine.
+
+    The fixture masks global and system git config to prevent a developer's
+    pull.rebase=true from silently changing the test scenario. This test
+    proves the fixture is needed: on a machine with pull.rebase=true in
+    global config, this test would fail (prove it by temporarily disabling
+    the fixture and running this test on such a machine).
+
+    The test asserts: within a fresh repo created by _init(), `git config
+    --get pull.rebase` exits non-zero (no such key in local config), AND
+    GIT_CONFIG_GLOBAL == os.devnull (fixture is masking global config).
+    """
+    # Verify the fixture set the environment variables correctly.
+    assert os.environ.get("GIT_CONFIG_GLOBAL") == os.devnull
+    assert os.environ.get("GIT_CONFIG_SYSTEM") == os.devnull
+    assert os.environ.get("GIT_CONFIG_NOSYSTEM") == "1"
+
+    # Create a fresh repo with only local config (no global/system).
+    repo = tmp_path / "test-repo"
+    _init(repo)
+
+    # Verify no pull.rebase setting exists in local config alone.
+    result = _git("config", "--get", "pull.rebase", cwd=repo, check=False)
+    assert result.returncode != 0, (
+        "pull.rebase should not exist in local config (would indicate global config leaked in)"
+    )
+    assert result.stdout == "", (
+        "pull.rebase lookup should produce no output when not set, "
+        "but got: {!r}".format(result.stdout)
+    )
+
+
+@pytest.fixture
+def rewritten_remote_and_clone(tmp_path):
+    """A clone whose history was rewritten out from under it.
+
+    Returns (remote, clone). The clone sits on `main` at the pre-rewrite commit
+    and carries tag v1.0 pointing at an object the remote no longer contains.
+    """
+    remote = _init(tmp_path / "remote")
+    (remote / "CLAUDE.md").write_text("local-only instructions\n")
+    (remote / "app.py").write_text("print('v1')\n")
+    _git("add", "-A", cwd=remote)
+    _git("commit", "-qm", "release 1.0", cwd=remote)
+    _git("tag", "v1.0", cwd=remote)
+
+    clone = tmp_path / "clone"
+    _git("clone", "-q", str(remote), str(clone), cwd=tmp_path)
+    pre_purge_tag = _git("rev-parse", "v1.0", cwd=clone).stdout.strip()
+
+    # Rewrite the remote's history: an orphan branch reproduces what filter-repo
+    # does to SHAs (new objects, no shared ancestry) without the dependency.
+    _git("checkout", "-q", "--orphan", "rewritten", cwd=remote)
+    (remote / "CLAUDE.md").unlink()
+    (remote / "app.py").write_text("print('v2')\n")
+    _git("add", "-A", cwd=remote)
+    _git("commit", "-qm", "release 1.1 (purged history)", cwd=remote)
+    _git("branch", "-qD", "main", cwd=remote)
+    _git("branch", "-qm", "main", cwd=remote)
+    _git("tag", "-d", "v1.0", cwd=remote)
+    _git("tag", "v1.0", cwd=remote)
+    _git("tag", "v1.1", cwd=remote)
+
+    post_purge_tag = _git("rev-parse", "v1.0", cwd=remote).stdout.strip()
+    assert pre_purge_tag != post_purge_tag, "fixture failed to diverge the tag"
+    return remote, clone
+
+
+def test_plain_fetch_tags_is_rejected(rewritten_remote_and_clone):
+    """Establishes the precondition: this is the failure users reported."""
+    _remote, clone = rewritten_remote_and_clone
+    result = _git("fetch", "--tags", cwd=clone, check=False)
+    assert result.returncode != 0
+    assert "would clobber existing tag" in result.stderr
+
+
+def test_plain_pull_cannot_advance_a_rewritten_clone(rewritten_remote_and_clone):
+    """Establishes the second precondition, the one --force alone did not fix."""
+    _remote, clone = rewritten_remote_and_clone
+    _git("fetch", "--tags", "--force", cwd=clone)
+    result = _git("pull", "origin", "main", cwd=clone, check=False)
+    assert result.returncode != 0, "expected the pull to fail on divergent history"
+    combined = result.stderr + result.stdout
+    assert (
+        "unrelated histories" in combined
+        or "Need to specify how to reconcile" in combined
+        or "divergent branches" in combined
+    ), f"unexpected pull failure mode: {combined}"
+
+
+def test_run_upgrade_recovers_a_rewritten_clone(
+    hc_module_real_git, rewritten_remote_and_clone, capsys
+):
+    """The whole point: --update must work on such a clone, unattended.
+
+    Only the final install chain is stubbed -- every git command runs for real
+    against the fixture repositories.
+    """
+    _remote, clone = rewritten_remote_and_clone
+    real_run = subprocess.run
+    shell_calls = []
+
+    def passthrough(cmd, *args, **kwargs):
+        if kwargs.get("shell"):
+            shell_calls.append(cmd)
+
+            class Ok:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return Ok()
+        return real_run(cmd, *args, **kwargs)
+
+    with (
+        patch.object(hc_module_real_git, "_repo_root", str(clone)),
+        patch("subprocess.run", side_effect=passthrough),
+        pytest.raises(SystemExit) as exc,
+    ):
+        hc_module_real_git._run_upgrade()
+
+    assert exc.value.code == 0, capsys.readouterr().out
+
+    # The clone is now actually on origin's rewritten tip.
+    local_head = _git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    remote_head = _git("rev-parse", "main", cwd=_remote).stdout.strip()
+    assert local_head == remote_head
+
+    # The purged file is gone and the new content is present, so setuptools-scm
+    # and make install would see the released tree.
+    assert not (clone / "CLAUDE.md").exists()
+    assert (clone / "app.py").read_text() == "print('v2')\n"
+
+    # Tags were force-updated, so the new release tag is visible.
+    assert _git("rev-parse", "v1.1", cwd=clone, check=False).returncode == 0
+    assert (
+        _git("rev-parse", "v1.0", cwd=clone).stdout.strip()
+        == _git("rev-parse", "v1.0", cwd=_remote).stdout.strip()
+    )
+
+    assert shell_calls and "make install" in shell_calls[0]
+
+
+def test_run_upgrade_refuses_to_discard_uncommitted_work(
+    hc_module_real_git, rewritten_remote_and_clone, capsys
+):
+    """The reset is destructive to tracked edits, so the dirty guard must hold.
+
+    This matters more now than when the checkout only ran on a branch switch:
+    the reset fires on every upgrade, including one started from main.
+    """
+    _remote, clone = rewritten_remote_and_clone
+    (clone / "app.py").write_text("print('my local edit')\n")
+
+    with (
+        patch.object(hc_module_real_git, "_repo_root", str(clone)),
+        pytest.raises(SystemExit) as exc,
+    ):
+        hc_module_real_git._run_upgrade()
+
+    assert exc.value.code == 1
+    assert "uncommitted changes" in capsys.readouterr().out
+    # The edit survives.
+    assert (clone / "app.py").read_text() == "print('my local edit')\n"
+
+
+def test_run_upgrade_ignores_submodule_build_byproducts(
+    hc_module_real_git, tmp_path, capsys
+):
+    """`make submodules`/`make install` leaves untracked/modified content
+
+    inside bundled submodules (generated sources, object files, a touched
+    Makefile) with no action from the operator. A plain `git status
+    --porcelain` reports that as `M <submodule>` on the superproject, which
+    must not be treated the same as an actual uncommitted edit to a tracked
+    file -- that would permanently block auto-upgrade after the very install
+    this tool tells people to run.
+    """
+    sub_remote = _init(tmp_path / "sub-remote")
+    (sub_remote / "expander.c").write_text("// v1\n")
+    _git("add", "-A", cwd=sub_remote)
+    _git("commit", "-qm", "sub v1", cwd=sub_remote)
+
+    remote = _init(tmp_path / "remote")
+    # Local submodule clones need this explicitly allowed: modern git refuses
+    # `file://`-transport submodule clones by default (CVE-2022-39253).
+    _git(
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(sub_remote),
+        "vendored",
+        cwd=remote,
+    )
+    (remote / "app.py").write_text("print('v1')\n")
+    _git("add", "-A", cwd=remote)
+    _git("commit", "-qm", "release 1.0", cwd=remote)
+    _git("tag", "v1.0", cwd=remote)
+
+    clone = tmp_path / "clone"
+    _git(
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "-q",
+        "--recurse-submodules",
+        str(remote),
+        str(clone),
+        cwd=tmp_path,
+    )
+
+    # A build step regenerated a source file and touched the Makefile inside
+    # the submodule's own working tree -- untracked/modified content within
+    # the submodule, not a commit change and not an edit to any file the
+    # superproject itself tracks.
+    (clone / "vendored" / "expander2.c").write_text("// generated\n")
+    (clone / "vendored" / "expander.c").write_text("// v1, rebuilt\n")
+
+    real_run = subprocess.run
+    shell_calls = []
+
+    def passthrough(cmd, *args, **kwargs):
+        if kwargs.get("shell"):
+            shell_calls.append(cmd)
+
+            class Ok:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return Ok()
+        return real_run(cmd, *args, **kwargs)
+
+    with (
+        patch.object(hc_module_real_git, "_repo_root", str(clone)),
+        patch("subprocess.run", side_effect=passthrough),
+        pytest.raises(SystemExit) as exc,
+    ):
+        hc_module_real_git._run_upgrade()
+
+    assert exc.value.code == 0, capsys.readouterr().out
+    assert shell_calls and "make install" in shell_calls[0]
+
+
+@pytest.fixture
+def hc_module_real_git():
+    import importlib
+    import os
+
+    os.environ["HATE_CRACK_SKIP_INIT"] = "1"
+    return importlib.import_module("hate_crack.main")
+
+
+def test_upgrade_path_has_no_pull(hc_module_real_git):
+    """Guards the source itself: reintroducing a pull here re-breaks the field.
+
+    A future edit could add a pull back without any mocked test noticing, since
+    a mocked pull always succeeds.
+    """
+    import ast
+
+    tree = ast.parse(Path(hc_module_real_git.__file__).read_text())
+    func = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_run_upgrade"
+    )
+    # The raw docstring node, not ast.get_docstring() -- that dedents the text,
+    # so it no longer compares equal to the literal in the tree.
+    doc_node = None
+    if func.body and isinstance(func.body[0], ast.Expr):
+        first = func.body[0].value
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            doc_node = first
+
+    # Every string literal the function builds a command from, minus the
+    # docstring and comments (comments are not in the AST at all).
+    literals = [
+        node.value
+        for node in ast.walk(func)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node is not doc_node
+    ]
+    offenders = [lit for lit in literals if "pull" in lit]
+    assert not offenders, f"_run_upgrade() must not pull: {offenders}"
+
+
+def test_inherited_git_repo_vars_do_not_leak_into_throwaway_repos(tmp_path):
+    """The session fixture in conftest must strip git's repo-location vars.
+
+    Git exports these to its own hooks, so `git push` running the prek pre-push
+    hook leaks them into pytest, and every test in this file then operates on
+    the outer repo's index rather than its own tmp_path repo. Asserted here
+    rather than in a conftest test because this is the file that broke.
+    """
+    for key in (
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+    ):
+        assert key not in os.environ, (
+            f"{key} is set during the test session; a test that shells out to "
+            "git will operate on the wrong repository. See "
+            "_isolate_git_environment in tests/conftest.py."
+        )
+
+    # And prove the practical consequence is gone: a commit in a fresh repo works.
+    repo = tmp_path / "scratch"
+    _init(repo)
+    (repo / "f.txt").write_text("x\n")
+    _git("add", "f.txt", cwd=repo)
+    _git("commit", "-qm", "initial", cwd=repo)
+    assert _git("rev-parse", "--short", "HEAD", cwd=repo).stdout.strip()
+
+
+def test_run_upgrade_ignores_untracked_operator_artifacts(
+    hc_module_real_git, rewritten_remote_and_clone, capsys
+):
+    """Untracked files in the checkout must not block auto-upgrade.
+
+    The dirty guard exists to protect tracked edits from `checkout -B`, which
+    aborts rather than discarding them. Untracked files are not at risk: the
+    checkout leaves them in place. Gating on them anyway is what bricked
+    `--update` in the field, because running hate_crack from a checkout
+    reliably creates them -- `.DS_Store` from one Finder visit on macOS, and
+    `hashcat/rules/` from the shipped `rules_directory` default of
+    `./hashcat/rules` that the rule and mask downloads write into. Neither is
+    an edit the operator made, and the error named no file, so there was
+    nothing to act on.
+    """
+    _remote, clone = rewritten_remote_and_clone
+    (clone / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (clone / "hashcat" / "rules").mkdir(parents=True)
+    (clone / "hashcat" / "rules" / "best64.rule").write_text(":\n")
+
+    real_run = subprocess.run
+    shell_calls = []
+
+    def passthrough(cmd, *args, **kwargs):
+        if kwargs.get("shell"):
+            shell_calls.append(cmd)
+
+            class Ok:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return Ok()
+        return real_run(cmd, *args, **kwargs)
+
+    with (
+        patch.object(hc_module_real_git, "_repo_root", str(clone)),
+        patch("subprocess.run", side_effect=passthrough),
+        pytest.raises(SystemExit) as exc,
+    ):
+        hc_module_real_git._run_upgrade()
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 0, out
+    assert "uncommitted changes" not in out
+    # The upgrade actually happened.
+    assert (clone / "app.py").read_text() == "print('v2')\n"
+    assert shell_calls and "make install" in shell_calls[0]
+    # And the operator's untracked files are still there, untouched.
+    assert (clone / ".DS_Store").exists()
+    assert (clone / "hashcat" / "rules" / "best64.rule").read_text() == ":\n"
+
+
+def test_run_upgrade_reports_an_untracked_file_the_checkout_would_overwrite(
+    hc_module_real_git, tmp_path, capsys
+):
+    """The one untracked case that does block, handled by the checkout itself.
+
+    `checkout -B` refuses when an incoming commit adds a file at a path an
+    untracked file already occupies -- the only way an untracked file can lose
+    data. Relaxing the dirty guard hands that case to the checkout's own error
+    path, so it must still exit non-zero and tell the operator which file.
+    """
+    remote = _init(tmp_path / "remote")
+    (remote / "app.py").write_text("print('v1')\n")
+    _git("add", "-A", cwd=remote)
+    _git("commit", "-qm", "release 1.0", cwd=remote)
+    _git("tag", "v1.0", cwd=remote)
+
+    clone = tmp_path / "clone"
+    _git("clone", "-q", str(remote), str(clone), cwd=tmp_path)
+
+    # Upstream adds a new tracked file...
+    (remote / "collides.txt").write_text("from upstream\n")
+    _git("add", "-A", cwd=remote)
+    _git("commit", "-qm", "release 1.1", cwd=remote)
+    _git("tag", "v1.1", cwd=remote)
+
+    # ...at a path the operator's checkout already has as an untracked file.
+    (clone / "collides.txt").write_text("operator's own\n")
+
+    with (
+        patch.object(hc_module_real_git, "_repo_root", str(clone)),
+        pytest.raises(SystemExit) as exc,
+    ):
+        hc_module_real_git._run_upgrade()
+
+    out = capsys.readouterr().out
+    assert exc.value.code == 1, out
+    assert "collides.txt" in out
+    # Nothing was clobbered.
+    assert (clone / "collides.txt").read_text() == "operator's own\n"
+
+
+def test_run_upgrade_names_the_uncommitted_files_it_refuses_over(
+    hc_module_real_git, rewritten_remote_and_clone, capsys
+):
+    """The message must name the files, not just say "commit or stash them".
+
+    The operator sees this on a machine they may not have edited deliberately,
+    so the message has to say which file to look at.
+    """
+    _remote, clone = rewritten_remote_and_clone
+    (clone / "app.py").write_text("print('my local edit')\n")
+
+    with (
+        patch.object(hc_module_real_git, "_repo_root", str(clone)),
+        pytest.raises(SystemExit) as exc,
+    ):
+        hc_module_real_git._run_upgrade()
+
+    assert exc.value.code == 1
+    assert "app.py" in capsys.readouterr().out

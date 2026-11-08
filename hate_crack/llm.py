@@ -1,0 +1,1158 @@
+"""Structured LLM password-candidate generation via Atomic Agents + Ollama.
+
+Isolates the atomic-agents / instructor dependency. The rest of hate_crack talks
+to this module only through ``generate_candidates`` and ``research_target``.
+
+``generate_masks`` is the one exception: it delegates entirely to
+``hashcat_rosetta.nlmask.generate_masks`` rather than using Atomic Agents,
+so hate_crack's mask-attack prompt, output schema, and hcmask validation
+all come from HashcatRosetta itself instead of a second, hand-maintained
+copy that would drift from it.
+"""
+
+import inspect
+import ipaddress
+import os
+import socket
+import sys
+from collections.abc import Callable
+from typing import Any
+from urllib.parse import urlsplit
+
+import instructor
+from openai import APITimeoutError, OpenAI
+from pydantic import Field
+
+from atomic_agents import AgentConfig, AtomicAgent, BaseIOSchema
+from atomic_agents.context import SystemPromptGenerator
+
+MAX_CANDIDATE_LEN = 128
+DEFAULT_TIMEOUT_SECONDS = 300.0
+
+# Researched target fields are pasted into an interactive prompt as an editable
+# default, so they must stay short enough to fit on one terminal line.
+MAX_RESEARCH_FIELD_LEN = 80
+
+# Import HashcatRosetta for mask generation. This module doesn't import
+# hate_crack.main (nor is it guaranteed to be imported after main.py's own
+# sys.path insertion -- main.py imports this module before doing that), so
+# it needs its own independent path setup rather than relying on main.py's.
+# See hate_crack.main.ROSETTA_IMPORT_ERROR for the identical pattern; the
+# two guards are deliberately separate rather than shared; either module
+# can be imported and used standalone.
+_ROSETTA_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "HashcatRosetta")
+)
+# Holds the ImportError when HashcatRosetta could not be imported, else None.
+ROSETTA_MASK_IMPORT_ERROR = None
+try:
+    if _ROSETTA_DIR not in sys.path:
+        sys.path.insert(0, _ROSETTA_DIR)
+    from hashcat_rosetta.mask import format_hcmask_line as _rosetta_format_hcmask_line
+    from hashcat_rosetta.nlmask import (
+        MaskGenerationError as _RosettaMaskGenerationError,
+    )
+    from hashcat_rosetta.nlmask import generate_masks as _rosetta_generate_masks
+except ImportError as _rosetta_mask_import_error:
+    ROSETTA_MASK_IMPORT_ERROR = _rosetta_mask_import_error
+    _rosetta_format_hcmask_line = None
+    _RosettaMaskGenerationError = None
+    _rosetta_generate_masks = None
+
+
+def rosetta_mask_unavailable_reason() -> str:
+    """Return a human-readable explanation for HashcatRosetta being missing.
+
+    Mirrors ``hate_crack.main.rosetta_unavailable_reason`` -- see that
+    function's docstring for why the underlying ImportError is preserved
+    rather than discarded.
+    """
+    message = (
+        "HashcatRosetta is unavailable. Run: git submodule update --init HashcatRosetta"
+    )
+    if ROSETTA_MASK_IMPORT_ERROR is not None:
+        message += f" (import failed: {ROSETTA_MASK_IMPORT_ERROR!r})"
+    return message
+
+
+class LLMTimeoutError(Exception):
+    """The LLM server accepted the request but did not respond in time.
+
+    Raised instead of ``openai.APITimeoutError`` so callers do not need to import
+    ``openai`` themselves.
+    """
+
+
+class RosettaBackendRefused(RuntimeError):
+    """``generate_masks`` was asked to use a non-Ollama backend on a
+    HashcatRosetta checkout that predates ``think``/``extra_request_body``
+    support in ``nlmask.generate_masks()``.
+
+    Originally this meant "the backend itself is unsupported" -- upstream
+    ``nlmask.py`` hardcoded Ollama's ``think`` toggle on, which is backwards
+    for a vLLM server running a reasoning parser. That has been fixed
+    upstream (see ``rosetta_backend_kwargs``), so this exception now guards a
+    narrower case: an operator whose ``HashcatRosetta`` submodule is older
+    than the fix still needs a clear message instead of a raw
+    ``TypeError: unexpected keyword argument 'think'``.
+
+    A ``RuntimeError`` subclass, not a fresh base ``Exception``, so the
+    existing ``rosetta_mask_unavailable_reason()`` failure mode (also a plain
+    ``RuntimeError``, for "HashcatRosetta is not installed") and any caller
+    that already catches ``RuntimeError`` around this function keep working
+    unchanged. Callers that want to tell "submodule too old" apart from
+    "generic failure" -- to avoid following a precise refusal with unrelated
+    connectivity advice -- can catch this subclass specifically before the
+    broader ``RuntimeError``/``Exception``.
+    """
+
+    def __init__(self, backend: str) -> None:
+        self.backend = backend
+        # Deliberately avoids the words "update" and "set" appearing together
+        # in this message -- bandit's B608 hardcoded-SQL heuristic matches
+        # `update\s.*set\s` case-insensitively against any f-string content,
+        # and "Update the submodule ... or set LLM_BACKEND=ollama" tripped
+        # that false positive even though nothing here touches a database.
+        super().__init__(
+            f"The Rosetta mask attack cannot use the {backend!r} backend with "
+            "this HashcatRosetta checkout: it predates the "
+            "think/extra_request_body parameters nlmask.generate_masks() "
+            "needs to talk to a non-Ollama server. Refresh the submodule "
+            "(git submodule update --remote HashcatRosetta, or make "
+            "submodules) to use this backend, or configure LLM_BACKEND=ollama."
+        )
+
+
+class CloudModelRefused(Exception):
+    """``OLLAMA_NO_CLOUD`` is set and the configured model is cloud-hosted."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        super().__init__(
+            f"{model!r} is an Ollama cloud model and OLLAMA_NO_CLOUD is set. "
+            "Prompts carry client corpus and target details, so this request "
+            "was not sent. Pick a locally-hosted model, or unset "
+            "OLLAMA_NO_CLOUD in your .env."
+        )
+
+
+def is_cloud_model(model: str) -> bool:
+    """Is *model* one Ollama proxies to ollama.com rather than running locally?
+
+    Cloud models are identified by a ``-cloud`` suffix on the tag
+    (``gpt-oss:120b-cloud``, ``deepseek-v3.1:671b-cloud``) or, untagged, on the
+    name itself. The local daemon accepts them at the same ``/v1`` endpoint as
+    a local model and forwards the prompt offsite, so the request looks
+    identical from here -- the name is the only signal available before the
+    data has already left.
+    """
+    return model.strip().rsplit(":", 1)[-1].endswith("-cloud")
+
+
+def ensure_model_allowed(model: str, *, no_cloud: bool) -> None:
+    """Raise :class:`CloudModelRefused` for a cloud model when *no_cloud*.
+
+    Called by every public entry point in this module rather than by their
+    callers, so the guard cannot be bypassed by reaching past ``main.py``.
+    ``no_cloud`` is keyword-only and has no default for the same reason: a new
+    call site has to state its policy instead of silently inheriting a
+    permissive one.
+    """
+    if no_cloud and is_cloud_model(model):
+        raise CloudModelRefused(model)
+
+
+# Hostnames that never leave this host or its local network regardless of what
+# they resolve to (or whether they resolve at all) -- these are conventional
+# local-only TLDs/suffixes (RFC 6762's ".local" plus the common ".internal",
+# ".lan", ".localdomain" conventions), not something DNS resolution could ever
+# contradict.
+_LOCAL_HOST_SUFFIXES = (".local", ".internal", ".lan", ".localdomain")
+
+
+def _default_resolve(host: str) -> list[str]:
+    """Resolve *host* to its address strings via ``socket.getaddrinfo``.
+
+    Returns an empty list (never raises) for a name that does not resolve --
+    the module-level default the ``resolve`` parameter falls back to, so a
+    failure surfaces as "no addresses" and lets the fail-closed rule in
+    ``is_offsite_url`` handle it uniformly with an injected resolver that
+    returns ``[]`` for the same case.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return []
+    # sockaddr's first element is typed str | int in typeshed (the port slot
+    # in the same tuple shape), even though it is always the address string
+    # in practice -- str() is a no-op at runtime and satisfies the checker.
+    return [str(info[4][0]) for info in infos]
+
+
+# CGNAT (RFC 6598): Python's ipaddress reports 100.64.0.0/10 as neither
+# is_private nor is_link_local, so the loopback/private/link-local test alone
+# would call it offsite. This range is exactly what Tailscale assigns to
+# every node's tailnet IP (with *.ts.net MagicDNS names resolving into it),
+# so reaching a GPU box over Tailscale -- an entirely ordinary "remote but
+# private" setup -- would otherwise be refused under OLLAMA_NO_CLOUD=true.
+# Treat it as local. Do not "simplify" this back to the is_private check.
+_CGNAT_TAILSCALE_RANGE = ipaddress.ip_network("100.64.0.0/10")
+
+# 6to4 (RFC 3056): 2002::/16 encodes a global IPv4 address in bits 16-47 of
+# the IPv6 address by definition, so it is always offsite even though
+# ipaddress.ip_address(...).is_private reports True for it on this
+# interpreter. Unlike the CGNAT case above, getting this one wrong leaks --
+# an offsite destination would be treated as local and the request sent with
+# no warning at all -- so it is checked explicitly rather than trusted to
+# is_private.
+_SIX_TO_FOUR_RANGE = ipaddress.ip_network("2002::/16")
+
+
+def _is_local_address(addr: str) -> bool | None:
+    """Is *addr* loopback, private, or link-local? ``None`` if unparseable."""
+    try:
+        parsed = ipaddress.ip_address(addr)
+    except ValueError:
+        return None
+    if parsed in _SIX_TO_FOUR_RANGE:
+        return False
+    if parsed in _CGNAT_TAILSCALE_RANGE:
+        return True
+    return parsed.is_loopback or parsed.is_private or parsed.is_link_local
+
+
+def is_offsite_url(
+    url: str, *, resolve: Callable[[str], list[str]] | None = None
+) -> bool:
+    """Does *url* name a destination outside this host/network?
+
+    Used to decide whether a configured LLM endpoint is safe for
+    ``OLLAMA_NO_CLOUD`` purposes. The hostname is extracted with
+    ``urllib.parse.urlsplit`` (this also strips brackets from a literal IPv6
+    host like ``[::1]``):
+
+    - An empty or unparseable host is **not** offsite -- it cannot be reached
+      at all, so there is nothing to refuse.
+    - ``localhost``, and anything ending in ``.local``, ``.internal``,
+      ``.lan``, or ``.localdomain``, is never offsite.
+    - An IP literal is offsite iff it is not loopback, private, or link-local
+      (covers IPv4 and IPv6).
+    - Anything else is resolved -- via *resolve* if given, else a default that
+      wraps ``socket.getaddrinfo`` -- and is offsite iff *any* resolved
+      address is neither loopback, private, nor link-local. A hostname that
+      resolves to a mix of private and global addresses is treated as
+      offsite: one global address is enough for the prompt to leave.
+    - **A hostname that fails to resolve (or resolves to nothing) is treated
+      as offsite.** This is deliberate fail-closed behaviour: an operator who
+      set ``OLLAMA_NO_CLOUD=true`` asked for "nothing leaves this host", and
+      refusing a destination this function cannot verify honours that request
+      better than silently allowing it through.
+    - CGNAT (``100.64.0.0/10``, RFC 6598) is treated as local -- Tailscale
+      assigns tailnet IPs from this range, so a GPU box reached over
+      Tailscale is an ordinary "remote but private" setup, not cloud egress.
+    - 6to4 (``2002::/16``, RFC 3056) is always treated as offsite: it encodes
+      a global IPv4 address by definition, regardless of what
+      ``ipaddress`` reports for it.
+
+    *resolve* exists so callers (and tests) never need real DNS: pass a stub
+    returning canned address lists instead of touching the network.
+
+    **Not a network-level guarantee.** This only classifies where *this*
+    request is addressed. It has no visibility into an HTTP proxy: the
+    OpenAI SDK's underlying httpx transport defaults to ``trust_env=True``,
+    so a destination this function calls local can still leave the host via
+    ``HTTPS_PROXY``/``ALL_PROXY`` if one is set in the environment.
+    """
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        # A malformed bracketed-IPv6 host (e.g. "http://[::1", a typo'd
+        # OLLAMA_HOST) raises here rather than parsing to an empty/odd
+        # hostname. Same rule as any other unparseable host: not offsite,
+        # since it cannot be reached at all.
+        return False
+    if not host:
+        return False
+    host = host.lower()
+    if host == "localhost" or host.endswith(_LOCAL_HOST_SUFFIXES):
+        return False
+
+    local = _is_local_address(host)
+    if local is not None:
+        return not local
+
+    resolver = resolve if resolve is not None else _default_resolve
+    addresses = resolver(host)
+    if not addresses:
+        return True  # Fail closed: unresolvable.
+
+    for addr in addresses:
+        local = _is_local_address(addr)
+        if local is False:
+            return True  # Any global address is enough to call this offsite.
+    return False
+
+
+class CloudDestinationRefused(Exception):
+    """``OLLAMA_NO_CLOUD`` is set and the configured destination is offsite."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        super().__init__(
+            f"{url!r} looks like it is off this host/network and OLLAMA_NO_CLOUD "
+            "is set. Prompts carry client corpus and target details, so this "
+            "request was not sent. Point the configured backend at a local or "
+            "private destination, or unset OLLAMA_NO_CLOUD in your .env."
+        )
+
+
+def ensure_destination_allowed(url: str, *, no_cloud: bool) -> None:
+    """Raise :class:`CloudDestinationRefused` for an offsite *url* when *no_cloud*.
+
+    Called by every public entry point in this module, immediately after
+    ``ensure_model_allowed``, so this guard cannot be bypassed by reaching past
+    ``main.py`` either. ``no_cloud`` is keyword-only with no default for the
+    same reason ``ensure_model_allowed`` is: a new call site has to state its
+    policy instead of silently inheriting a permissive one.
+    """
+    if no_cloud and is_offsite_url(url):
+        raise CloudDestinationRefused(url)
+
+
+def offsite_destination_warning(
+    url: str, backend: str, *, no_cloud: bool
+) -> str | None:
+    """Operator-facing warning text for an offsite *url*, else ``None``.
+
+    Returns a string rather than printing -- this module does no I/O today and
+    must not start; ``main.py`` prints it.
+
+    Returns ``None`` when *no_cloud* is true: ``ensure_destination_allowed``
+    is about to refuse the same request outright, and printing "engagement
+    data ... will be sent there" immediately before "this request was not
+    sent" would contradict the refusal that actually happens. The refusal is
+    the message that must be believed, so this warning only exists for the
+    other case -- with the guard off (the default), a refusal would help
+    nobody who has not already opted in, so this is the other half of that
+    pair: tell the operator plainly that engagement data is about to leave
+    the host, and name the setting that would have stopped it. ``no_cloud``
+    is keyword-only with no default, matching every other policy parameter in
+    this module: a new call site has to state it rather than silently
+    inheriting a permissive one.
+    """
+    if no_cloud or not is_offsite_url(url):
+        return None
+    return (
+        f"Warning: {url!r} looks like it is off this host/network. Prompts to "
+        f"the {backend} backend carry sampled recovered plaintexts and client "
+        "target details, and they will be sent there. Set OLLAMA_NO_CLOUD=true "
+        "in your .env to refuse this instead."
+    )
+
+
+class GenerationInput(BaseIOSchema):
+    """Instruction and context for a password-candidate generation request."""
+
+    request: str = Field(
+        ..., description="The full instruction, including any target or sample context."
+    )
+
+
+class PasswordCandidatesOutput(BaseIOSchema):
+    """A structured list of candidate passwords / basewords."""
+
+    candidates: list[str] = Field(
+        ...,
+        description=(
+            "Candidate passwords, one per list entry. No numbering, bullets, or "
+            "explanation — just the raw candidate strings."
+        ),
+    )
+
+
+class HashcatRulesOutput(BaseIOSchema):
+    """A structured list of hashcat rule strings."""
+
+    rules: list[str] = Field(
+        ...,
+        description=(
+            "Hashcat rules, one per list entry. Each entry is the raw rule "
+            "string of single-character functions, e.g. 'c$2$0$2$5'. No "
+            "numbering, comments, quoting, or explanation."
+        ),
+    )
+
+
+class TargetResearchInput(BaseIOSchema):
+    """The company name to recall industry, location, and parent company details for."""
+
+    company: str = Field(
+        ..., description="The name of the target organization, exactly as typed."
+    )
+
+
+class TargetResearchOutput(BaseIOSchema):
+    """Recalled industry, location, and parent company for a named organization, or empty strings."""
+
+    industry: str = Field(
+        ...,
+        description=(
+            "The organization's industry or sector as a short phrase, e.g. "
+            "'regional healthcare provider' or 'commercial construction'. Return "
+            "an empty string if you do not actually recognize this organization."
+        ),
+    )
+    location: str = Field(
+        ...,
+        description=(
+            "The organization's primary location as 'City, State/Country'. Return "
+            "an empty string if you do not actually recognize this organization."
+        ),
+    )
+    parent_company: str = Field(
+        ...,
+        description=(
+            "The organization's parent company or the company that acquired it, "
+            "if you specifically recall an acquisition or merger, e.g. 'Acquired "
+            "by Global Corp in 2021'. Return an empty string if you do not "
+            "genuinely recall an acquisition, or if the organization is "
+            "independent as far as you know."
+        ),
+    )
+
+
+_RESEARCH_PROMPT = SystemPromptGenerator(
+    background=[
+        "You are assisting a security professional on an authorized penetration "
+        "test who is about to generate password candidates for a named client "
+        "organization.",
+        "You have no internet access. You may only answer from what you already "
+        "know about the organization.",
+        "Most client organizations are small and will be completely unknown to "
+        "you. That is the expected case, not a failure.",
+    ],
+    steps=[
+        "Decide whether you genuinely recognize this specific organization by name.",
+        "If you do, recall its industry or sector, its primary location, and "
+        "whether you specifically recall it being acquired by or merged into "
+        "another company.",
+        "If you do not recognize it, or you are not reasonably confident, do not "
+        "guess and do not infer anything from the words in the name.",
+    ],
+    output_instructions=[
+        "Return an empty string for any field you are not reasonably confident "
+        "about. An empty field is correct and useful; a fabricated one is harmful "
+        "because the operator may mistake it for real intelligence.",
+        "Keep each field under 80 characters.",
+        "Return only the industry, location, and parent_company fields — no "
+        "explanations, hedging, caveats, or commentary.",
+    ],
+)
+
+_TARGET_PROMPT = SystemPromptGenerator(
+    background=[
+        "You are a security professional generating password candidates during an "
+        "authorized penetration test / capture-the-flag exercise.",
+    ],
+    steps=[
+        "Study the provided target context (company, industry, location, and any parent company information).",
+        "Derive basewords from the company name and industry terms, including any names the organization was previously known by.",
+        "Combine basewords with common suffixes, years, and leetspeak substitutions.",
+    ],
+    output_instructions=[
+        "Return only candidate passwords in the candidates list.",
+        "Do not include explanations, numbering, or duplicate entries.",
+    ],
+)
+
+_WORDLIST_PROMPT = SystemPromptGenerator(
+    background=[
+        "You build denylist basewords so users cannot set weak passwords.",
+    ],
+    steps=[
+        "Study the sample passwords for patterns: capitalization, leetspeak, "
+        "suffixes, and common substitutions.",
+        "Produce basewords that capture those patterns.",
+    ],
+    output_instructions=[
+        "Return only basewords in the candidates list.",
+        "Do not include explanations, numbering, or duplicate entries.",
+    ],
+)
+
+_CRACKED_PROMPT = SystemPromptGenerator(
+    background=[
+        "You are a security professional generating password candidates during an "
+        "authorized penetration test.",
+        "The passwords you are shown were already recovered from this specific "
+        "target organization, so they reveal that organization's real password "
+        "conventions.",
+    ],
+    steps=[
+        "Study the recovered plaintexts for the organization's conventions: "
+        "basewords, capitalization, seasons and months, years, separators, "
+        "suffixes, and leetspeak substitutions.",
+        "Infer the naming habits behind them (company and product names, local "
+        "sports teams, site or department names, keyboard walks).",
+        "Generate NEW candidates that follow the same conventions, varying the "
+        "basewords, years, and suffixes the organization clearly favours.",
+    ],
+    output_instructions=[
+        "Return only candidate passwords in the candidates list.",
+        "Do not repeat any password that appears in the input — those are already "
+        "cracked and retrying them is wasted work.",
+        "Do not include explanations, numbering, or duplicate entries.",
+    ],
+)
+
+_PATTERN_PROMPT = SystemPromptGenerator(
+    background=[
+        "You are a security professional working an authorized penetration test.",
+        "The sample passwords you are shown come from the target environment, so "
+        "the words behind them reveal what that organization's users draw on when "
+        "they invent a password.",
+        "Your output is a baseword list. A separate hashcat rule file will supply "
+        "all of the capitalization, digits, years, separators, suffixes, and "
+        "leetspeak — so decorating a baseword yourself only wastes a slot.",
+    ],
+    steps=[
+        "Read the corpus statistics. They cover every password in the corpus, so "
+        "a baseword's share tells you how much of the organization chose it — "
+        "treat the high-share entries as the strongest signal about what these "
+        "users draw on.",
+        "Strip each word you are shown down to the word or words behind it, "
+        "ignoring case, digits, and punctuation.",
+        "Group them into the semantic families they belong to: the company "
+        "and its products, site or department names, local sports teams and city "
+        "names, seasons and months, hobbies, mascots, keyboard walks.",
+        "For every family you identify, list more members of that family than the "
+        "corpus actually contains — the point is to predict the words other users "
+        "at this organization chose, not to echo the ones already recovered.",
+    ],
+    output_instructions=[
+        "Return lowercase letters only. No digits, punctuation, spaces, or "
+        "capitals anywhere in a baseword — the rules add those.",
+        "One baseword per list entry. Multi-word basewords run together, e.g. "
+        "'acmewidgets', not 'acme widgets'.",
+        "Skip generic filler such as 'password', 'welcome', 'letmein', and "
+        "'qwerty'. Stock wordlists already cover those, so they crowd out the "
+        "organization-specific guesses that make this list worth running.",
+        "Do not include explanations, numbering, or duplicate entries.",
+    ],
+)
+
+_RULES_PROMPT = SystemPromptGenerator(
+    background=[
+        "You are a security professional working an authorized penetration test.",
+        "You write hashcat rules. A rule is a string of single-character "
+        "functions applied left to right to a candidate baseword.",
+        "A separate baseword list supplies the words. Your rules supply "
+        "everything else: capitalization, digits, years, symbols, leetspeak.",
+        "The functions you may use, and nothing else: ':' no-op, 'l' lowercase "
+        "all, 'u' uppercase all, 'c' capitalize first, 'C' lowercase first and "
+        "uppercase the rest, 't' toggle all, 'TN' toggle position N, '$X' append "
+        "character X, '^X' prepend character X, 'DN' delete position N, '[' "
+        "delete first, ']' delete last, 'r' reverse, 'd' duplicate, 'sXY' "
+        "replace every X with Y.",
+        "Positions are single characters: 0-9 for 0-9, then A-Z for 10-35.",
+        "Every append and prepend takes exactly one character, so a two-character "
+        "suffix needs two functions. To append the digits 99, write '$9$9'. To "
+        "append the symbol '$' itself, write '$$' — one function whose argument "
+        "happens to be a dollar sign.",
+    ],
+    steps=[
+        "Read the corpus statistics. The mask, casing, length, trailing-digit "
+        "and trailing-symbol tables describe how this organization decorates a "
+        "word, and each entry's share tells you how many users decorate it that "
+        "way.",
+        "Work through the tables one entry at a time and write the rule that "
+        "reproduces that entry on a plain lowercase baseword. A capitalized word "
+        "with a year appended is 'c' then '$2' '$0' '$2' '$5', written together "
+        "as 'c$2$0$2$5'. An all-caps word with a symbol and two digits is "
+        "'u$#$4$2'.",
+        "Cover every distinct shape the statistics show, not only the most "
+        "common one. A mask or suffix listed at 8% is 8% of the corpus you leave "
+        "uncracked by skipping it.",
+        "Then add variations around each shape — the neighbouring years, the "
+        "other common symbols, the same suffix without the capital, the suffix "
+        "on an all-caps word — since the point is to predict decorations the "
+        "corpus does not already contain.",
+    ],
+    output_instructions=[
+        "Return one rule per list entry. A rule is the raw function string with "
+        "no quotes, no comments, no '#' lines, and no explanation.",
+        "Return at least 40 rules, and more when the statistics show more shapes. "
+        "A handful of rules wastes the run: the operator gets one pass over the "
+        "basewords and every shape you omit is a shape that goes uncracked.",
+        "Use only the functions listed above. Any other character makes the rule "
+        "invalid and it will be discarded.",
+        "Never include a literal newline or tab inside a rule.",
+        "Keep each rule under 31 functions.",
+        "Do not include duplicate rules.",
+    ],
+)
+
+_PROMPTS = {
+    "target": _TARGET_PROMPT,
+    "wordlist": _WORDLIST_PROMPT,
+    "cracked": _CRACKED_PROMPT,
+    "pattern": _PATTERN_PROMPT,
+    "rules": _RULES_PROMPT,
+}
+
+
+def _corpus_block(context_data: dict) -> str:
+    """Render the corpus portion of a request from *context_data*.
+
+    ``summary`` holds whole-corpus statistics (see hate_crack.corpus_stats) and
+    ``sample`` the literal plaintexts, which are only present when the whole
+    corpus fit under the sample cap. Either may be absent; both are labelled so
+    the model does not mistake a frequency table for a list of passwords to
+    return.
+    """
+    parts = []
+    summary = context_data.get("summary", "")
+    sample = context_data.get("sample", "")
+    if summary:
+        parts.append("=== CORPUS STATISTICS (whole corpus) ===\n" + summary)
+    if sample:
+        parts.append("=== PASSWORDS ===\n" + sample)
+    return "\n".join(parts)
+
+
+def _build_request(mode: str, context_data: dict) -> str:
+    """Build the natural-language request string for the given mode."""
+    if mode == "target":
+        company = context_data.get("company", "")
+        industry = context_data.get("industry", "")
+        location = context_data.get("location", "")
+        parent_company = context_data.get("parent_company", "")
+        # Build the target description, optionally including parent company info.
+        target_desc = (
+            f"The target organization is '{company}', a {industry} in {location}"
+        )
+        if parent_company:
+            target_desc += f" ({parent_company})"
+        target_desc += ". "
+        return (
+            target_desc
+            + "Generate as many plausible password candidates as you can, using "
+            "permutations of the company name and industry terms with common "
+            "suffixes, years, and leetspeak substitutions."
+        )
+    if mode == "wordlist":
+        return (
+            "Here is a description of a password corpus. Study its patterns and "
+            "generate basewords for a denylist:\n" + _corpus_block(context_data)
+        )
+    if mode == "pattern":
+        return (
+            "Here is a description of the passwords in the target environment. "
+            "Identify the semantic families of words behind them, then return as "
+            "many lowercase letters-only basewords from those families as you "
+            "can, including words the corpus does not contain. The statistics "
+            "tell you which basewords and habits dominate the organization, so "
+            "weight your answer toward the families the common ones belong to. "
+            "Hashcat rules will mutate these, so add no digits, capitals, or "
+            "punctuation:\n" + _corpus_block(context_data)
+        )
+    if mode == "rules":
+        return (
+            "Here is a description of the passwords in the target environment. "
+            "Study the decoration habits it reveals — where users put capitals, "
+            "which digits and years they append, which symbols they favour, how "
+            "they substitute letters — and return hashcat rules that reproduce "
+            "those habits. The masks, casing shares, and trailing-digit and "
+            "trailing-symbol tables tell you which decorations dominate, so "
+            "order your rules with the most common first:\n"
+            + _corpus_block(context_data)
+        )
+    if mode == "cracked":
+        return (
+            "The passwords described below were already cracked from the target "
+            "organization. Study the conventions they reveal and generate as many "
+            "NEW password candidates as you can that follow the same conventions. "
+            "Do not repeat any password shown to you, and note that a high-share "
+            "baseword in the statistics is one many users chose, so it is worth "
+            "varying rather than repeating:\n" + _corpus_block(context_data)
+        )
+    raise ValueError(f"Unknown LLM generation mode: {mode}")
+
+
+#: Every backend this module knows how to shape a request for. Used by
+#: backend_extra_body()'s "unknown backend" refusal below; generate_masks()
+#: does not reference this constant -- it drives exactly one backend
+#: ("ollama") and refuses every other member of this set for its own,
+#: HashcatRosetta-specific reason (see RosettaBackendRefused).
+KNOWN_BACKENDS = ("ollama", "vllm", "openai")
+
+
+def backend_extra_body(backend: str, num_ctx: int) -> dict[str, Any]:
+    """Build the ``extra_body`` payload for *backend*'s chat-completion request.
+
+    Every backend here speaks the OpenAI ``/v1`` chat-completions API, but two
+    of them need a request field the other does not, so this is not a single
+    shared payload:
+
+    - ``"ollama"``: ``{"options": {"num_ctx": num_ctx}}``. Ollama's own
+      context-window knob; unchanged from before this function existed.
+    - ``"vllm"``: ``{"chat_template_kwargs": {"thinking": False}}``. Verified
+      empirically against a live vLLM 0.26.0 server: vLLM accepts and *ignores*
+      unknown fields (HTTP 200, not 400), so sending Ollama's ``options`` there
+      would simply be inert -- that is not why this branch exists. The reason
+      is a reasoning parser: when one is active, a reasoning-capable model
+      routes its entire structured JSON payload into ``message.reasoning`` and
+      leaves ``message.content`` set to ``None``. Every caller in this module
+      reads ``.content``, so instructor dies with a JSON-decode error on an
+      empty string. ``chat_template_kwargs={"thinking": False}`` is the fix
+      that was actually verified to populate ``content`` instead. The
+      superficially similar ``{"enable_thinking": False}`` is WRONG -- it does
+      not error, it silently returns an empty JSON object, so a naive "looks
+      like it works" test would not have caught it.
+    - ``"openai"``: ``{}``. A generic OpenAI-compatible server gets no
+      backend-specific extras; ``num_ctx`` has no equivalent there.
+
+    Raises ``ValueError`` naming the value and the valid set for anything else.
+    """
+    if backend == "ollama":
+        return {"options": {"num_ctx": num_ctx}}
+    if backend == "vllm":
+        return {"chat_template_kwargs": {"thinking": False}}
+    if backend == "openai":
+        return {}
+    raise ValueError(
+        f"Unknown LLM backend {backend!r}; expected one of {KNOWN_BACKENDS}"
+    )
+
+
+def rosetta_backend_kwargs(backend: str, num_ctx: int) -> dict[str, Any]:
+    """Build the keyword arguments to hand ``hashcat_rosetta.nlmask.generate_masks``
+    for *backend*.
+
+    This is ``backend_extra_body``'s counterpart for the Rosetta mask path:
+    that function shapes an ``extra_body`` dict for this module's own
+    Atomic-Agents requests, while ``nlmask.generate_masks`` takes ``think``
+    and ``extra_request_body`` as its own keyword parameters instead (added
+    upstream specifically so a non-Ollama caller can turn Ollama's ``think``
+    toggle off -- see that function's docstring for why a reasoning-capable
+    model routes its whole structured response into ``message.reasoning``,
+    leaving ``message.content`` empty, when ``think`` is left on for a
+    server other than Ollama).
+
+    - ``"ollama"``: ``{"extra_options": {"num_ctx": num_ctx}}`` -- today's
+      behaviour exactly. ``think`` is deliberately not passed here at all,
+      leaving it at ``nlmask.generate_masks``'s own default (``True``), which
+      is what keeps this path byte-identical to before this function existed.
+    - ``"vllm"``: ``{"think": False, "extra_request_body":
+      {"chat_template_kwargs": {"thinking": False}}}``. No ``extra_options``
+      -- Ollama's ``options`` field is inert on vLLM (accepted and ignored,
+      HTTP 200 not 400), so sending it would only be noise. ``"thinking"`` is
+      the verified-correct key; the superficially similar
+      ``"enable_thinking"`` is WRONG -- on at least one DeepSeek chat
+      template it does not error, it silently returns an empty JSON object,
+      which is a worse failure than a hard one.
+    - ``"openai"``: ``{"think": False}`` only. A generic OpenAI-compatible
+      server has no thinking toggle to set via ``extra_request_body`` and no
+      Ollama ``options`` to receive.
+
+    Raises ``ValueError`` naming the value and the valid set for anything
+    else, matching ``backend_extra_body``'s behaviour.
+    """
+    if backend == "ollama":
+        return {"extra_options": {"num_ctx": num_ctx}}
+    if backend == "vllm":
+        return {
+            "think": False,
+            "extra_request_body": {"chat_template_kwargs": {"thinking": False}},
+        }
+    if backend == "openai":
+        return {"think": False}
+    raise ValueError(
+        f"Unknown LLM backend {backend!r}; expected one of {KNOWN_BACKENDS}"
+    )
+
+
+#: LLM_API_KEY's own schema default (config_schema.py) -- the placeholder
+#: Ollama's server ignores. Re-substituted here for an empty/whitespace-only
+#: value so it stays out of SECRET_ENV_KEYS (that set's contract is "ships
+#: empty in .env.example", which would collide with this fallback) while
+#: still being a safe, inert stand-in wherever a real key is not required.
+_INERT_API_KEY = "ollama"
+
+
+def _resolve_api_key(api_key: str) -> str:
+    """Substitute the inert placeholder for an empty/whitespace-only *api_key*.
+
+    ``OpenAI(api_key="")`` raises ``openai.OpenAIError: Missing credentials``
+    immediately on client construction -- confirmed directly against the
+    openai SDK -- whereas ``api_key=None`` is accepted. A vLLM server started
+    without ``--api-key`` needs no credential at all, so an operator who
+    reasonably clears ``LLM_API_KEY=`` in their `.env` would otherwise hit an
+    SDK error naming neither hate_crack nor the setting they just edited.
+    """
+    return api_key if api_key.strip() else _INERT_API_KEY
+
+
+def _build_client(url: str, api_key: str, timeout: float) -> instructor.Instructor:
+    """Build the instructor-wrapped OpenAI client pointed at *url*.
+
+    ``api_key`` is whatever the configured backend needs -- Ollama ignores it
+    outright, vLLM started with ``--api-key`` rejects the wrong one with a 401,
+    and a generic OpenAI-compatible server needs a real one. Never hardcoded
+    here: see ``LLM_API_KEY`` in config_schema.py. An empty or
+    whitespace-only value is treated as the inert placeholder rather than
+    reaching the OpenAI SDK, which raises on ``api_key=""`` -- see
+    ``_resolve_api_key``.
+    """
+    return instructor.from_openai(
+        OpenAI(
+            base_url=f"{url}/v1", api_key=_resolve_api_key(api_key), timeout=timeout
+        ),
+        mode=instructor.Mode.JSON,
+    )
+
+
+def clean_research_field(value: object) -> str:
+    """Strip and length-cap one researched field; return '' for no suggestion.
+
+    Anything that is not a non-empty string after stripping — including a model
+    that echoed whitespace or an over-long ramble — becomes '' so the caller
+    falls back to a plain blank prompt instead of pasting model noise into it.
+    """
+    if not isinstance(value, str):
+        return ""
+    cleaned = " ".join(value.split())
+    if len(cleaned) > MAX_RESEARCH_FIELD_LEN:
+        cleaned = cleaned[:MAX_RESEARCH_FIELD_LEN].rstrip()
+    return cleaned
+
+
+def research_target(
+    url: str,
+    model: str,
+    num_ctx: int,
+    company: str,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    no_cloud: bool,
+    backend: str,
+    api_key: str,
+) -> TargetResearchOutput:
+    """Ask the local model what it already knows about *company*.
+
+    Returns a ``TargetResearchOutput`` whose ``industry``, ``location``, and
+    ``parent_company`` fields are stripped and capped at ``MAX_RESEARCH_FIELD_LEN``;
+    any field may be '' when the model is not confident, which callers must treat
+    as "no suggestion".
+
+    ``backend`` and ``api_key`` are keyword-only with no default, mirroring
+    ``no_cloud`` and ``ensure_model_allowed``'s own reasoning: a new call site
+    must state its policy rather than silently inheriting a permissive one.
+
+    Uses only the configured local model server — no web lookups, so the client
+    name never leaves the host. Raises LLMTimeoutError if the request exceeds
+    ``timeout``, CloudModelRefused when ``no_cloud`` rules out ``model``,
+    CloudDestinationRefused when ``no_cloud`` rules out ``url``, ValueError
+    for an unknown ``backend``; other client/connection errors propagate to
+    the caller.
+    """
+    ensure_model_allowed(model, no_cloud=no_cloud)
+    ensure_destination_allowed(url, no_cloud=no_cloud)
+    client = _build_client(url, api_key, timeout)
+    extra_body = backend_extra_body(backend, num_ctx)
+
+    agent = AtomicAgent[TargetResearchInput, TargetResearchOutput](
+        config=AgentConfig(
+            client=client,
+            model=model,
+            system_prompt_generator=_RESEARCH_PROMPT,
+            model_api_parameters={"extra_body": extra_body},
+        )
+    )
+
+    try:
+        result = agent.run(TargetResearchInput(company=company))
+    except APITimeoutError as e:
+        raise LLMTimeoutError(
+            f"no response from {url} within {timeout:g} seconds"
+        ) from e
+
+    return TargetResearchOutput(
+        industry=clean_research_field(getattr(result, "industry", "")),
+        location=clean_research_field(getattr(result, "location", "")),
+        parent_company=clean_research_field(getattr(result, "parent_company", "")),
+    )
+
+
+def generate_candidates(
+    url: str,
+    model: str,
+    num_ctx: int,
+    mode: str,
+    context_data: dict,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    no_cloud: bool,
+    backend: str,
+    api_key: str,
+) -> list[str]:
+    """Generate password candidates via an AtomicAgent against the configured backend.
+
+    ``timeout`` is the number of seconds to wait for a generation response before
+    giving up; it bounds the whole request so a server that accepts the
+    connection but never replies (e.g. a large model still loading into VRAM)
+    cannot hang the caller forever.
+
+    ``backend`` and ``api_key`` are keyword-only with no default, mirroring
+    ``no_cloud``: a new call site must state its policy rather than silently
+    inheriting a permissive one.
+
+    Returns a deduped, length-capped list of candidate strings (may be empty).
+    Raises ValueError for an unknown mode or an unknown ``backend``,
+    LLMTimeoutError if the request exceeds ``timeout``, CloudModelRefused
+    when ``no_cloud`` rules out ``model``, and CloudDestinationRefused when
+    ``no_cloud`` rules out ``url``. Other client/connection errors propagate
+    to the caller.
+    """
+    ensure_model_allowed(model, no_cloud=no_cloud)
+    ensure_destination_allowed(url, no_cloud=no_cloud)
+    request = _build_request(mode, context_data)
+
+    client = _build_client(url, api_key, timeout)
+    extra_body = backend_extra_body(backend, num_ctx)
+    # _build_request has already rejected unknown modes, so this lookup is safe.
+    prompt_generator = _PROMPTS[mode]
+
+    agent = AtomicAgent[GenerationInput, PasswordCandidatesOutput](
+        config=AgentConfig(
+            client=client,
+            model=model,
+            system_prompt_generator=prompt_generator,
+            model_api_parameters={"extra_body": extra_body},
+        )
+    )
+
+    try:
+        result = agent.run(GenerationInput(request=request))
+    except APITimeoutError as e:
+        raise LLMTimeoutError(
+            f"no response from {url} within {timeout:g} seconds"
+        ) from e
+
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for raw in getattr(result, "candidates", []) or []:
+        candidate = str(raw).strip()
+        if not candidate or len(candidate) > MAX_CANDIDATE_LEN:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+    return candidates
+
+
+def generate_rules(
+    url: str,
+    model: str,
+    num_ctx: int,
+    context_data: dict,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    no_cloud: bool,
+    backend: str,
+    api_key: str,
+) -> list[str]:
+    """Generate hashcat rules describing a corpus's decoration habits.
+
+    The companion to ``generate_candidates(mode="pattern")``: that call infers
+    the basewords, this one infers the rules that mutate them, so the pair
+    covers what the Spoonman attack derives mechanically (see
+    hate_crack.rulegen).
+
+    ``backend`` and ``api_key`` are keyword-only with no default, mirroring
+    ``no_cloud``: a new call site must state its policy rather than silently
+    inheriting a permissive one.
+
+    Returns a deduped list of raw rule strings in the order the model gave them,
+    which its prompt asks to be most-productive-first. Entries are *not*
+    validated here — callers must screen them with ``rulegen.validate_rule``
+    before handing the file to hashcat, since an invalid rule is dropped
+    silently rather than reported.
+
+    Raises LLMTimeoutError if the request exceeds ``timeout``,
+    CloudModelRefused when ``no_cloud`` rules out ``model``,
+    CloudDestinationRefused when ``no_cloud`` rules out ``url``, ValueError
+    for an unknown ``backend``; other client/connection errors propagate to
+    the caller.
+    """
+    ensure_model_allowed(model, no_cloud=no_cloud)
+    ensure_destination_allowed(url, no_cloud=no_cloud)
+    request = _build_request("rules", context_data)
+    client = _build_client(url, api_key, timeout)
+    extra_body = backend_extra_body(backend, num_ctx)
+
+    agent = AtomicAgent[GenerationInput, HashcatRulesOutput](
+        config=AgentConfig(
+            client=client,
+            model=model,
+            system_prompt_generator=_PROMPTS["rules"],
+            model_api_parameters={"extra_body": extra_body},
+        )
+    )
+
+    try:
+        result = agent.run(GenerationInput(request=request))
+    except APITimeoutError as e:
+        raise LLMTimeoutError(
+            f"no response from {url} within {timeout:g} seconds"
+        ) from e
+
+    seen: set[str] = set()
+    rules: list[str] = []
+    for raw in getattr(result, "rules", []) or []:
+        # A non-string entry is model noise, not a rule; str() on it would turn
+        # None into the literal "None", which validate_rule would then reject
+        # for the wrong reason.
+        if not isinstance(raw, str):
+            continue
+        # Surrounding whitespace goes so that '  c$1  ' and 'c$1' dedupe against
+        # each other. The cost is that a rule ending in a literal space
+        # argument ('$ ', append a space) cannot come back from the model this
+        # way — worth it, since models pad far more often than they append
+        # spaces, and an unstripped rule would otherwise slip past dedup.
+        rule = raw.strip()
+        if not rule or rule in seen:
+            continue
+        seen.add(rule)
+        rules.append(rule)
+    return rules
+
+
+def generate_masks(
+    url: str,
+    model: str,
+    num_ctx: int,
+    description: str,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    no_cloud: bool,
+    backend: str,
+    api_key: str,
+) -> list[str]:
+    """Generate hashcat brute-force masks from a plain-English description.
+
+    Unlike the other generation modes, this one takes no corpus context — the
+    operator's free-text description of expected password shapes is the whole
+    request. Unlike them too, this one delegates entirely to
+    ``hashcat_rosetta.nlmask.generate_masks`` rather than using Atomic Agents
+    directly -- the prompt, the output schema (including custom charsets),
+    hcmask syntax validation, and the one-retry-on-failure behavior all come
+    from HashcatRosetta itself, so this module never carries its own
+    independent copy of any of that to drift out of sync.
+
+    Each suggestion HashcatRosetta returns (a mask plus 0-8 custom charsets)
+    is combined into a single canonical hcmask line via
+    ``hashcat_rosetta.mask.format_hcmask_line`` before being returned here.
+
+    Returns a deduped list of hcmask line strings in the order HashcatRosetta
+    gave them. Every entry is already syntax-validated -- unlike the other
+    generation modes in this module, there is no separate screening step
+    callers need to run before handing the file to hashcat.
+
+    ``backend`` and ``api_key`` are keyword-only with no default, mirroring
+    the other three entry points, and all three known backends work here --
+    ``rosetta_backend_kwargs`` shapes the ``think``/``extra_request_body``
+    keywords ``nlmask.generate_masks`` added upstream specifically so a
+    non-Ollama caller can turn Ollama's ``think`` toggle off (it is exactly
+    backwards for vLLM: left on, it keeps a reasoning-parser payload routed
+    into ``message.reasoning`` rather than ``message.content``, the same
+    failure ``backend_extra_body``'s vLLM branch exists to avoid elsewhere in
+    this module). If the installed ``HashcatRosetta`` submodule predates
+    those parameters, a non-Ollama backend still raises
+    RosettaBackendRefused -- detected via ``inspect.signature`` rather than
+    attempted and caught, so the operator gets a clear "update the
+    submodule" message instead of a raw
+    ``TypeError: unexpected keyword argument 'think'``. The Ollama path is
+    never guarded this way: an old submodule still works fine for it.
+
+    Raises LLMTimeoutError if the request exceeds ``timeout``,
+    CloudModelRefused when ``no_cloud`` rules out ``model``,
+    CloudDestinationRefused when ``no_cloud`` rules out ``url``, RuntimeError
+    if HashcatRosetta itself is unavailable (see
+    ``rosetta_mask_unavailable_reason``), RosettaBackendRefused (itself a
+    RuntimeError subclass) if ``backend`` is not ``"ollama"`` and the
+    installed HashcatRosetta submodule lacks ``think``/``extra_request_body``
+    support; other client/connection errors propagate as HashcatRosetta's own
+    MaskGenerationError.
+    """
+    ensure_model_allowed(model, no_cloud=no_cloud)
+    ensure_destination_allowed(url, no_cloud=no_cloud)
+
+    # The three names are always set together in the single try/except above
+    # (all real or all None) -- checking all three, not just the one this
+    # function calls first, is what lets the type checker narrow the later
+    # uses of the other two instead of still seeing `X | None`.
+    if (
+        _rosetta_generate_masks is None
+        or _RosettaMaskGenerationError is None
+        or _rosetta_format_hcmask_line is None
+    ):
+        raise RuntimeError(rosetta_mask_unavailable_reason())
+
+    if backend != "ollama":
+        supported_params = inspect.signature(_rosetta_generate_masks).parameters
+        if (
+            "think" not in supported_params
+            or "extra_request_body" not in supported_params
+        ):
+            raise RosettaBackendRefused(backend)
+
+    client = OpenAI(
+        base_url=f"{url}/v1", api_key=_resolve_api_key(api_key), timeout=timeout
+    )
+
+    try:
+        suggestions = _rosetta_generate_masks(
+            description,
+            model=model,
+            client=client,
+            # host=url: nlmask.generate_masks() only feeds this into
+            # resolve_base_url() for its own error-message text -- the
+            # actual request always rides on `client`, which is already
+            # built against `url` above. Omitting it left resolve_base_url()
+            # falling back to OLLAMA_HOST (unset in-process, since hate_crack
+            # reads it from .env rather than exporting it) and then to its
+            # own http://localhost:11434 default, so a failed request to a
+            # remote vLLM/OpenAI host reported "could not reach Ollama at
+            # http://localhost:11434/v1" -- correct code path, wrong error
+            # message, telling the operator to debug a server they never
+            # contacted.
+            host=url,
+            **rosetta_backend_kwargs(backend, num_ctx),
+        )
+    except _RosettaMaskGenerationError as e:
+        # HashcatRosetta wraps every request failure (including a plain
+        # openai.APITimeoutError) into its own MaskGenerationError, but
+        # preserves the original as __cause__ (`raise ... from exc`) -- that
+        # chained exception, not string-matching the message, is what tells
+        # a genuine timeout apart from every other failure it also wraps the
+        # same way (connection refused, bad JSON, validation failure after
+        # retry, ...).
+        if isinstance(e.__cause__, APITimeoutError):
+            raise LLMTimeoutError(
+                f"no response from {url} within {timeout:g} seconds"
+            ) from e
+        raise
+
+    seen: set[str] = set()
+    masks: list[str] = []
+    for suggestion in suggestions:
+        combined = _rosetta_format_hcmask_line(
+            suggestion.custom_charsets, suggestion.mask
+        )
+        if combined in seen:
+            continue
+        seen.add(combined)
+        masks.append(combined)
+    return masks

@@ -1,0 +1,109 @@
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "ruff"
+name = "ruff"
+entry = "uv run ruff check hate_crack tests tools packaging hate_crack.py"
+language = "system"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "ruff-format"
+name = "ruff-format"
+entry = "uv run ruff format --check hate_crack tests tools packaging hate_crack.py"
+language = "system"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "ty"
+name = "ty"
+entry = "uv run ty check --exit-zero-on-warning hate_crack"
+language = "system"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "pytest"
+name = "pytest"
+entry = "env HATE_CRACK_SKIP_INIT=1 uv run pytest -q"
+language = "system"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "pytest-lima"
+name = "pytest-lima"
+entry = "uv run pytest tests/test_lima_vm_install.py -v"
+language = "system"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "bandit"
+name = "bandit security scan (vs baseline)"
+entry = "uvx --from 'bandit[toml]==1.9.4' bandit -r hate_crack -c pyproject.toml -b .bandit-baseline.json -q"
+language = "system"
+stages = ["pre-push"]
+pass_filenames = false
+always_run = true
+
+# Publication-boundary and index-corruption guards. These are pre-commit, not
+# pre-push, on purpose: by pre-push time the bad commit already exists locally,
+# and the pre-push stash/restore cycle is itself what corrupts the index
+# (issue #224). Both scripts read the staged changeset from the index rather
+# than trusting .gitignore, since `git add -f` past .gitignore is the exact
+# failure mode. They live in .github/scripts/ because a tracked hook must not
+# execute a script from an untracked path.
+[[repos.hooks]]
+id = "publication-boundary"
+name = "publication boundary (no local-only dev aids in a public repo)"
+entry = ".github/scripts/check-publication-boundary.sh"
+language = "system"
+stages = ["pre-commit"]
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "mass-deletion"
+name = "mass-deletion sanity check (corrupt index guard)"
+entry = ".github/scripts/check-mass-deletion.sh"
+language = "system"
+stages = ["pre-commit"]
+pass_filenames = false
+always_run = true
+
+# General hygiene hooks (mirrors hashview's .pre-commit-config.yaml). These run
+# at the pre-commit stage, so `prek install` must include `--hook-type pre-commit`.
+# Auto-fixers modify files in place; re-stage and commit again.
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v5.0.0"
+
+[[repos.hooks]]
+id = "trailing-whitespace"
+
+[[repos.hooks]]
+id = "end-of-file-fixer"
+
+[[repos.hooks]]
+id = "check-yaml"
+
+[[repos.hooks]]
+id = "check-merge-conflict"
+
+[[repos.hooks]]
+id = "check-added-large-files"
+args = ["--maxkb=1024"]
+
+# Blocks committing PEM/OpenSSH private keys. The repo had no secret-scanning
+# gate at all before this; bandit only covers hate_crack/.
+[[repos.hooks]]
+id = "detect-private-key"

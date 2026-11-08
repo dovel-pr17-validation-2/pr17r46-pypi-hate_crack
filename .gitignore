@@ -1,0 +1,141 @@
+config.json
+# Timestamped/editor backups of config.json carry the same populated API keys as
+# config.json itself. Only the exact name was ignored, so a `git add -A` in a
+# checkout holding one would have staged live credentials into a public repo.
+config.json.bak*
+config.json.*.bak
+config.json.orig
+config.json.save
+config.json~
+# The .env that now holds the third-party integration keys, same reasoning.
+# config.json is not deprecated -- it keeps the other 35 settings. hate_crack *creates*
+# this file at first startup (from a legacy config.json, or from defaults), so a
+# populated one exists in the checkout of anyone who has run the tool, and it can
+# hold up to four secrets: HASHVIEW_API_KEY, HASHMOB_API_KEY,
+# NOTIFY_PUSHOVER_TOKEN and NOTIFY_PUSHOVER_USER. The backup spellings are listed
+# for the same reason they are above: ignoring only the exact name is what let a
+# backup slip through last time. `.env.example` is deliberately NOT ignored -- it
+# is tracked, generated from schema defaults, and holds no values.
+.env
+.env.bak*
+.env.*.bak
+.env.orig
+.env.save
+.env~
+# Playwright MCP scratch output (console logs, traces, screenshots).
+.playwright-mcp/
+# hcatPotfilePath falls back to "hashcat.potfile" inside the checkout, so the
+# name hate_crack itself writes needs covering too, not just hashcat's default.
+#
+# Both spellings are globbed rather than named, because hcatPotfilePath is a
+# configurable setting: point it at engagement.potfile or client.pot and the two
+# literal names that used to be listed here matched nothing. A potfile is a
+# hash:plaintext list, so that was the same exposure as the artifacts below with
+# a different filename. SECRET_ARTIFACT_PATTERNS in tests/test_repo_hygiene.py
+# has always used these globs; .gitignore was the narrower of the two.
+*.pot
+*.potfile
+# Cracked-plaintext session artifacts. `.out` is a hash:plaintext list and
+# `.passwords` is pure plaintext; the rest carry hashes or intermediate cracks.
+# These were ignored only by .git/info/exclude, which is local-only and does not
+# clone, so on any other contributor's machine `git add -A` staged them into a
+# public repo. No tracked file matches any of these patterns.
+*.out
+*.passwords
+*.working
+*.combined
+*.nt
+*.lm
+*.cracked
+*.xlsx
+# The *source* dump, which the patterns above missed. Everything derived from an
+# NTDS extract was covered -- `corp.ntds.nt`, `corp.ntds.nt.out` -- but
+# `corp.ntds` and `ntds.dit` themselves were not, and a raw NTDS extract is a
+# domain-wide hash dump: the single highest-value artifact in this workflow.
+# Locally it was covered only by a `*ntds*` line in .git/info/exclude, which
+# does not clone, so every other contributor's checkout staged it on `git add
+# -A` -- the same gap that the block above exists to close, one step upstream.
+# Deliberately `*.ntds` and not `*ntds*`: the broad form would swallow tracked
+# files such as tests/test_upload_cracked_hashes.py.
+*.ntds
+ntds.dit
+# Hash lists written with an explicit extension. Narrow on purpose, for the same
+# reason: `*hashes*` matches a tracked test file.
+*.hashes
+# Per-attack scratch directories (basewords, candidate lists, LLM patterns),
+# removed by cleanup() but left behind by a crash or a hard interrupt.
+*.rosetta/
+*.spoonman/
+*.llm_patterns/
+# hashcat --debug-mode 5 output. hate_crack writes one of these for every
+# rule-based attack without being asked (see _add_debug_mode_for_rules), and
+# each line pairs a rule with the plaintext it cracked. The default
+# hcatDebugLogPath is the relative "./hashcat_debug", so on any run launched
+# from a checkout they land in the repo. The second pattern catches the same
+# logs when hcatDebugLogPath points somewhere else inside the tree.
+hashcat_debug/
+hashcat_debug*.log
+# Operator wordlist collections, same relative-default reasoning as
+# hashcat_debug/ above: config.json.example ships hcatWordlists as
+# "./wordlists" and hcatOptimizedWordlists as "./optimized_wordlists", so on a
+# checkout that kept the defaults the corpora land in the repo. They are also
+# large enough to matter -- a real collection runs to tens of gigabytes -- and
+# a cracked-password corpus is client data, which is the one thing that must
+# never reach a public remote. Untracked content here also blocks the
+# `git status --porcelain` dirty check in _run_upgrade(), so an operator using
+# the shipped defaults cannot self-upgrade until it is ignored. No tracked file
+# matches either pattern.
+wordlists/
+optimized_wordlists/
+# Downloaded rule and mask files, same relative-default reasoning: the shipped
+# rules_directory is "./hashcat/rules", so on a checkout that kept the default
+# the Hashview/Hashmob rule and mask downloads land in the repo. No tracked
+# file lives under a directory named hashcat -- the bundled utilities are
+# hashcat-utils, which this does not match.
+hashcat/
+# macOS Finder metadata. One visit to the folder creates it, and it is ignored
+# on a developer machine only via a personal global excludesfile, which does
+# not clone -- so it showed up untracked on an operator install and nowhere
+# else.
+.DS_Store
+hate_crack/__init__.pyc
+hate_crack/_version.py
+__pycache__/
+hate_crack/__pycache__/
+tests/__pycache__/
+uv.lock
+build/
+dist/
+hate_crack.egg-info/
+hate_crack/hashcat-utils/
+hate_crack/princeprocessor/
+*.txt.expanded
+*.hcmask
+*.ollama_candidates
+*.filtered
+research/
+--help
+4_char_all
+all_hashes.enabled
+some_histories
+
+# Local agent tooling and instructions - intentionally not published.
+#
+# CLAUDE.md and .claude/ used to live here. They are published deliberately as
+# of 2026-08-21: CLAUDE.md is the contributor-facing account of the branching,
+# release and config policies, and .claude/ holds the tooling it refers to.
+# Only the personal and the genuinely local remain unpublished.
+#
+# settings.local.json is per-developer, per-machine permission state. Claude
+# Code's own docs call it "personal/not checked in" and auto-add it to global
+# git excludes; committing it would also gate its rules behind the workspace
+# trust dialog, which is not what a personal file is for.
+.claude/settings.local.json
+.claude/plans/
+.claude/specs/
+docs/plans/
+docs/superpowers/
+
+#possible client data
+left_*
+found_*

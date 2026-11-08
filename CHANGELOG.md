@@ -1,0 +1,2390 @@
+# Changelog
+
+All notable changes to this project are documented here.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Dates are omitted for releases predating this file; see the git tags for exact timing.
+
+## [Unreleased]
+
+## [2.39.0] - 2026-10-31
+
+### Security
+- **`litellm` and `filelock` now have minimum versions (`>=1.96.2`, `>=4.2.1`), clearing the pip-audit failure.** Neither is imported by hate_crack; both arrive through `atomic-agents`. With no floor, a fresh resolve picked openai 3.x and fell back to `litellm` 1.83.0, the last release that does not cap `openai<3`, which carries over a dozen advisories. Bumping `litellm` alone then pulled in a vulnerable `filelock` 3.x through `huggingface-hub`. openai now resolves to 2.x, as it did before openai 3 shipped.
+
+### Added
+- **A weekly workflow batches Dependabot's Python updates into one reviewed branch.** `.github/workflows/dependabot-batch.yml` applies every open Dependabot `uv` PR to `nightly-dev`, runs the full local gates (ruff, ty, bandit, pip-audit, pytest) after each bump, keeps only the green ones, and force-pushes the result to `deps/dependabot-batch`. A tracking issue lists what was included and what was skipped and why, with a link that opens the pull request. It runs only on a schedule or a manual dispatch by a repo writer, picks up only pull requests authored by Dependabot from this repository, and runs the updated code without a write token; the job that pushes re-checks every commit against its pull request's live diff before pushing. GitHub Actions updates are listed for manual handling rather than applied.
+- **A pull request template.** It fills each new pull request with the contributor checklist from `CONTRIBUTING.md`: target `nightly-dev`, include no engagement data, use Conventional Commits, add an `[Unreleased]` CHANGELOG entry, and run the local gates. It also explains that a `Fixes #NNN` in a pull request to `nightly-dev` closes nothing, since GitHub acts on closing keywords only when they reach `main`.
+- **A `Promotion source` check fails any pull request into `main` whose head is not this repository's `nightly-dev`.** GitHub rulesets cannot restrict a pull request's head branch, so the "promotion PRs only" rule for `main` was previously enforced by reviewers alone and a fork PR could land with an approval. The check runs from its own workflow, `promotion-source.yml`, which also fires on `edited`, so retargeting a pull request onto `main` re-runs it. It blocks only once added as a required status check on the `main` ruleset.
+
+### Fixed
+- **Bandrel's pipal feedback pass now runs (#357).** After the company-name masks, Bandrel builds a mask from each baseword pipal finds in the cracked passwords, but the code that launched hashcat had ended up under an `else` instead of inside the loop. So when pipal found basewords, none of them were attacked, and when it found none, Bandrel ran a stray 12-character mask built from the last company name. Each pipal baseword now gets its own run, and nothing runs when pipal finds none. The pipal masks also passed `-1=xX`, and because hashcat reads everything after `-1` as the charset, every first-position candidate included a literal `=`. That `=` is gone. Thanks to @Mojo8898 for the loop fix.
+- **The Rosetta attack no longer loses winning rules mined from debug logs that hashcat wrote with a `$HEX[...]` rule field (#338).** hashcat dev builds from 2026-09-20 to 2026-09-27 (upstream `836f11de1` until `ebcbf7fcf6` reverted it) wrote any rule containing `:`, a control byte, or a byte above `0x7f` as `$HEX[...]` in the `--debug-mode` file. The bare `:` no-op came out as `$HEX[3a]`, and it is among the most frequent winning rules. Rosetta copied that string into `rules.rule`, and hashcat decodes `$HEX[...]` in a wordlist but not in a rule file, so it silently dropped the rule (exit 0, no message). The bumped `HashcatRosetta` submodule decodes the wrapper back to the rule hashcat applied, writing control and high bytes in the `\xNN` form a rule file accepts, and still reads the raw rule field that every other hashcat build writes. A rule now counts once whichever way its log spelled it, so its frequency is no longer split between two entries. The submodule bump also brings directory input for its CLI, vLLM reasoning-parser support in `nlmask`, and a `$HEX[...]` decode in its `--stdout` verifier; hate_crack's call sites need no changes for any of them.
+
+### Changed
+- **Promotion to `main` is now a reviewed merge-commit pull request, enforced by a repository ruleset.** Direct pushes to `main` are rejected; the only way in is a pull request from `nightly-dev` with one approving review from someone other than the last pusher, passing Lint, type-check, and tests, Bandit SAST, pip-audit and Workflow lint, merged with a merge commit (squash and rebase are blocked, so released commits are never re-counted by `tools/next_version.py`). `nightly-dev` is protected against deletion and force-push and requires linear history, and `v*` tags can no longer be moved or deleted. `CLAUDE.md` and `CONTRIBUTING.md` no longer describe fast-forwarding `main`, merging `main` down, or direct-to-`main` hotfixes.
+
+## [2.38.2] - 2026-10-15
+
+### Security
+- **Tagging no longer uses the `workflow_run` trigger.** Tag and release creation moved from two `workflow_run`-triggered workflows into a `tag` job in `ci.yml` gated on `needs:` for every other job, so a commit that failed CI is still never tagged. zizmor rates `workflow_run` an error-level dangerous trigger. The workflow token is now read-only; only the `tag` job is granted `contents: write`.
+- **The release baseline is now the highest final tag merged into `origin/main`.** A final-looking tag pushed anywhere else no longer moves the version, and the tool exits non-zero if that ref is missing.
+- **`release.yml` refuses to publish a final `vX.Y.Z` tag that `origin/main` does not contain.** The release is now created with `gh release create` rather than a third-party action, and candidates (`vX.Y.ZrcN`) are published as prereleases with `--latest=false`, so a candidate can never become "latest".
+
+### Added
+- **A `workflow-lint` CI job runs actionlint and zizmor on `.github/workflows/`, and the `tag` job now waits for it.** Both tools are version-pinned, so a new lint rule cannot silently change what a green run means. Workflow invariants are pinned by tests in `tests/test_workflow_hygiene.py`, so a change that breaks one fails the suite rather than the next release.
+
+## [2.38.1] - 2026-10-15
+
+### Fixed
+- **`--hashview` no longer exits after you switch to a downloaded hashfile.** Answering yes to "Switch to this hashfile for cracking?" printed "Returning to main menu to start cracking..." and then the process exited, because the `--hashview` path called `sys.exit(0)` unconditionally once the Hashview menu returned. It now continues into preprocessing and the main menu with the downloaded hashfile, as `--download-hashview` already did, and still exits when nothing was loaded.
+
+- **Tab completion no longer erases the prompt under the `rich` backend.** File-path prompts such as Spoonman's corpus path still completed the right paths, but the prompt was printed through the Rich console and `input()` got none, so readline had no prompt to redraw: `ro<Tab>` overwrote `[*] Enter path to password corpus:` with the completed path, and a double-Tab match listing dropped the prompt entirely. `RichUI.ask` and `RichUI.confirm` now hand the prompt to `input()`, as `PlainUI` does; the console print added no styling, so the visible output is unchanged. `tests/test_rich_prompt_readline.py` drives both backends in a real pty.
+
+## [2.38.0] - 2026-10-13
+
+### Added
+- **Terminal output and prompting go through a UI seam, selected by the new `ui_backend` config key; the default is `rich`.** Output and prompts were roughly a thousand bare `print()` and `input()` calls scattered through the code, which left no single place to change how hate_crack presents itself. `hate_crack/ui/` now defines a `UI` Protocol with two implementations, `PlainUI` and `RichUI`, plus `resolve_backend_name`, `build_ui` and `get_ui`/`set_ui`/`reset_ui`, and 988 call sites now route through it: `main.py` 521, `attacks.py` 291, `api.py` 171, `noninteractive.py` 4 and `attack_coverage.py` 1, via `say`, `warn`, `error`, `success` and `ask`. `ui_backend` is a `config.json` key (with `UI_BACKEND` as its environment override) and now defaults to `rich`, which on a terminal colours output by severity: warnings yellow, errors bold red (on stderr), successes green. Piped and scripted runs are unaffected, because the backend downgrades to `plain` whenever stdout is not a TTY, `TERM` is `dumb`, or a non-interactive subcommand is running; `PlainUI.say` is literally `print` and `PlainUI.ask` is `input(prompt) or default`, so that output is byte-identical to before. Severity markers such as `[!]` and `[*]` stay inside the message strings; the method chosen selects styling only. A non-plain backend also prints one `[*] UI backend: <name>` line at startup. Some code is deliberately left alone. `formatting.py`, `progress.py`, `menu.py` and `cli.py` are what `PlainUI` delegates to, so routing them back through `get_ui()` would be circular. `config_loader.py` (22 sites) emits during the import-time `load_config()` that produces the very value selecting the backend, so no backend exists yet when it runs. The 18 module-scope prints in `main.py` run at import, before argparse, and stay plain permanently. And 17 sites pass `print` as a value (`print_fn=print`) rather than calling it; those paths still bypass the seam and are a known follow-up. The backend must be installed before any converted call site runs: `main()` does it immediately after `non_interactive` is finalised, and `tests/test_ui_wiring_precedes_output.py` guards the ordering. `main()` already installs its own handler for the double-interrupt feature, so the precondition holds today, and the test stops that being removed unnoticed.
+- **Non-interactive subcommands for seventeen more menu attacks (#340).** The scripted surface was `quick | dict | brute | topmask` — three of the twenty-five menu attacks, so anything driving hate_crack programmatically (a scheduler, a CI harness, a tool choosing what to run next) had to fall back to feeding keystrokes to the menu for the rest. Added, taking nothing beyond the hash file and hash type: `fingerprint`, `combinator`, `hybrid`, `pathwell`, `prince`, `pcfg`, `princeling`, `smartmask`, `corporate`. Added, taking the one input their menu entry prompts for: `bandrel` (`--company`), `permute` (`--wordlist`), `adhocmask` (`--mask`), `ngram` (`--corpus`), `combipow` (`--wordlist`), `spoonman` (`--corpus`), `omen` (`--max-candidates`), `loopback` (`--rules`). Each also accepts the tuning its prompts offer — `fingerprint --max-expander-len/--keyspace-limit`, `corporate --min/--max`, and so on — and an omitted flag passes the attack function's own default rather than restating it. Five entries stay interactive-only because a flag cannot carry what they need: Markov brute force, Random Rules, Rosetta, the LLM attack, and Extensive Pure_Hate. `--exit-code-on-skip` works uniformly across all of them, and exit `2` still means "this build does not have that subcommand" rather than "it ran".
+- **`hcatBandrel` accepts the company name as an argument.** It was the one attack in the group above that could not be scripted at all: the name came from a `while True: input(...)` loop that refused an empty answer and had no default, so a run with no terminal raised `EOFError` inside the loop rather than proceeding. Passing `company_name` skips the prompt; omitting it is unchanged.
+
+- **Weakpass torrent downloads show live progress.** A Weakpass download hands the payload to a private `transmission-daemon` and then polled it in silence until a torrent finished, so a multi-gigabyte list looked hung for its entire transfer. Each poll now reads the daemon's own `transmission-remote -l` status and reports every torrent in flight — percent, bytes so far, ETA and download rate — plus how many of the batch have completed. On a terminal the line redraws in place; redirected to a file or pipe, a line is written only when a torrent crosses a 10% step, so a long download does not log every three seconds.
+
+### Changed
+- **Weakpass integration migrated from scraping the Inertia page to the public REST API, from 68 requests to 17 (#339).** The listing endpoint (`GET /wordlists?page=N`) paginates at 100 entries per page, resolving the full set of 1,690 wordlists in one-quarter the requests. The menu now displays tier (S–F) and crack rate (%) alongside the name.
+
+- **The four hashcat-oracle test files invoke `/opt/hashcat/hashcat` explicitly instead of whatever `shutil.which` finds first.** These tests exist to ask the real binary questions our own reference implementations cannot answer — whether `rulegen.derive()`'s escapes mean what we think, whether a mask enumerates what `corpus_stats._mask` claims, whether the suite's NTLM helper agrees with hashcat. Pointed at the wrong build they answer wrongly, and a wrong answer does not read as a broken environment: in `test_rule_oracle.py` and `test_mask_oracle.py` it reads as a derivation regression, and in `test_hashcat_rules.py` it does not read as anything at all, because an unusable device trips that file's `hashcat OpenCL device error (environment issue)` skip and the whole file silently becomes a no-op. Targeting the binary hate_crack itself shells out to (`hcatBin`) removes the ambiguity. Where no executable exists at that path the tests skip, as they did before when hashcat was absent from `PATH`; `Dockerfile.test` runs hashcat inside the container and is unaffected, and CI has no hashcat and skipped these already.
+
+- **`hate_crack/noninteractive.py` is now driven by one `ATTACK_SPECS` table** instead of parallel subparser registrations and an `if`-chain dispatcher. `ATTACK_COMMANDS` is derived from it rather than hand-maintained, which closes a failure mode that grows with each subcommand added: `main.py` sets its `non_interactive` global from membership in that tuple, so a name registered as a subparser but missed in the tuple would have run the attack with every interactive prompt still live, blocking on a stdin nothing is attached to. Tests assert the derivation in both directions.
+
+### Fixed
+- **List prompts take arrow keys.** Quick Crack's wordlist and rule pickers, the OMEN/Markov training pickers, the Random Rules wordlist picker, the Weakpass wordlist list, and the Hashview download-wordlist and download-rule ID prompts print a list and then read free text (paths, `p`/`q`, `1,2`, `1+1`, ranges), so they are not menus and Up/Down did nothing. `UI.ask` gains an optional `choices=` hint, and when a prompt passes it, `PlainUI.ask` and `RichUI.ask` swap readline history for the listed keys for that one `input()` (`cli.choice_history`) and restore the operator's history afterwards, even on Ctrl-C/EOF. Up fills in the last listed key, Up again the one before it, Down goes back; typed input is returned as-is, and a `,`, `+` or `-` typed after an arrow-filled key extends it. Down from an empty prompt does nothing, which is how readline history works. Verified in a real pty against libedit as well as by unit test. The rule picker is shared, so every attack that selects rules gets this.
+- **Arrow-key menus (`HATE_CRACK_ARROW_MENU=1`) accept a typed number as well as arrows, including multi-digit keys like `99`.** `simple-term-menu`'s own `[x]` shortcuts are single-character, so options 10 and up were arrows-only. The menu now runs with `search_key=None` so any keystroke starts its incremental search, and after Enter an exact key the operator typed wins over the highlighted row (the search is a regex over the whole row, so `1` also matches labels containing a 1). Typing anything else filters the list.
+- **The hashcat-oracle tests report a broken hashcat as a broken hashcat.** When hashcat's GPU backend cannot build its kernels it exits 255 with nothing on stdout. `test_rule_oracle.py` read that empty output as hashcat rejecting the rule, so every case failed as `hashcat rejected 'c$1' outright` — a false `rulegen.derive()` regression — while `test_mask_oracle.py`'s wrong-mask negative control passed, because a hashcat that never ran also never cracks. The oracle tests now run hashcat through one helper, `tests/_hashcat_oracle.py`: a kernel-build failure skips with the reason, any other unexpected exit fails with the exit code and stderr, and the wrong-mask control requires hashcat to have run to exhaustion. `test_rule_oracle.py` still reads hashcat's output as raw bytes, so a candidate holding a literal CR is not split in two.
+- **`tests/test_upgrade_real_git.py` no longer reads the developer's git config.** A global `pull.rebase=true` made the pull in `test_plain_pull_cannot_advance_a_rewritten_clone` rebase instead of refuse, so the test failed on that machine and nowhere else. The module now points `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `os.devnull`, and a guard test fails on every machine if that masking is removed.
+- **Torrent status rows are parsed by column anchors, not token position.** `transmission-remote -l`'s Have, ETA and Status columns are one or two words (`None` / `1.50 GB`, `Done` / `3 hours`, `Idle` / `Up & Down`), so splitting on whitespace and indexing shifted the status and name for any torrent that had downloaded anything. Completion detection used only the percent column and was unaffected; the status and name it reported were wrong.
+- **Weakpass wordlist fetching is now robust against partial listings and hard errors (#339).** The old name-based de-duplication silently dropped 62 wordlists across 60 names; the new ID-based scheme keeps all of them, each with its own distinct torrent. When a page fetch fails, the failed page numbers are reported, the partial listing is not cached, and the next run refetches to catch what was missed. Percent-encoded torrent filenames from the API are decoded before being saved to disk, so the names match what the BitTorrent metadata reports. Unresolvable wordlist lookups surface a clear API error message instead of an HTML debug dump. The `/files/` fallback URL no longer works (it 302-redirects to the homepage) and has been removed.
+- **`--download-all-torrents` no longer fails with FileNotFoundError when the Weakpass cache is missing.** A missing `weakpass_wordlists.json` now triggers a fetch and writes the result before downloading begins. If the fetch returns an empty list, an error message is printed and the function exits without writing.
+- **A mistyped number at an interactive prompt re-asks instead of ending the attack.** Eight prompts parsed their answer with a bare `int(input(...))`, so one stray character raised `ValueError` out of the handler. OMEN's `Max candidates to generate` was the worst of them, because it did not fail at the prompt: the rules picker runs next, so the traceback landed after the operator had chosen a model and a rule set, discarded both, and exited hate_crack to the shell. The same shape sat behind the wordlist tools' length, char-class mask, byte-offset, substring-length and shard-count prompts, and behind Hashview's `Enter hash type`, where the surrounding `except Exception` reported the typo as `Error connecting to Hashview` — a message that is simply untrue and sends anyone debugging it at the network. All eight now go through `cli.prompt_int`, which re-asks on a non-number or a value below the stated minimum, takes a default for empty input, and treats `q` or EOF as cancel so the caller can abort its own attack. The one prompt that stays hand-rolled is the substring length, where blank means "rest of the line" and so cannot share `prompt_int`'s meaning for `None`.
+- **An unrecognised key at OMEN's use-existing/train-new menu says so.** It fell through to the bottom of the loop and repainted the same three options, which is indistinguishable from a keypress the terminal never delivered. Every other picker in `attacks.py` prints `[!] Invalid selection.`; this one now does too.
+- **Readline completion is configured in one place, and binds the key its backend actually understands.** `attacks._configure_readline` and the inline block in `main.select_file_with_autocomplete` were near-duplicates that had to be edited together and had already drifted — only one suppressed the "Display all N possibilities?" pager, only the other installed a display hook. Worse, both fired *both* bind syntaxes inside bare `try/except: pass`: `readline.parse_and_bind` accepts a string meant for the other backend without complaining, so a wrong or missing bind could never surface. That failure is not cosmetic — an unbound Tab inserts a literal tab character instead of completing, which reads to an operator as "tab completion is broken" with nothing logged anywhere. Both now call `cli.configure_completion`, which picks `bind ^I rl_complete` (libedit, which is what macOS ships) or `tab: complete` (GNU readline) from `readline.backend` and lets a genuine bind failure raise. The `" \t;"` delimiter set and the reason newline stays out of it are unchanged.
+- **The OMEN/Markov/PCFG `Select wordlist:` prompt offers tab completion, and accepts a path.** It was a bare `input()` with no completer registered, so Tab there inserted a literal tab — completion was reachable only after typing `p` for the custom-path branch, which was not discoverable from the prompt. It now installs the same wordlist completer every other wordlist prompt uses, and a typed path to an existing file is accepted rather than falling through to "Invalid selection"; a directory is refused with the reason, since training takes a single corpus file.
+- **That prompt's `p` branch completes against the wordlists directory instead of the install directory.** It called `select_file_with_autocomplete` with no `base_dir`, which falls back to globbing the process CWD — and the bash shim runs hate_crack via `uv run --directory`, so CWD is the install tree, not anywhere the operator keeps wordlists. Tab offered the repo's own files.
+- **`select_file_with_autocomplete` returns `""` rather than `None` for empty input.** Around twenty call sites do `select_file_with_autocomplete(...).strip()`, and the ones with no `base_dir` to fall back on had no non-empty result to return — so a bare Enter at, for example, "Enter path to output wordlist" raised `AttributeError: 'NoneType' object has no attribute 'strip'` and dropped the operator out of the menu mid-task. Every caller tested falsiness or `isinstance`, never `is None`, so the guards downstream are unaffected.
+- **The wordlist-subtract prompt handles the multi-path answer it asks for.** It passed `allow_multiple=True` and then called `.strip()` on the result, but that flag makes the selector return a *list* as soon as the input contains a comma — which is the entire point of the prompt. Entering the comma-separated list it asks for raised `AttributeError`; only a single path worked. Normalised through a shared helper that accepts str, list or empty.
+- **`combinator` routes by wordlist count, as the menu does.** `hcatCombination` slices to `wordlists[:2]`, so a scripted `--wordlist a b c` would have run against `a` and `b` and silently dropped `c` — while the subcommand's own help promised "two or more". Two wordlists now go to `hcatCombination`, exactly three to `hcatCombinator3`, and anything else to `hcatCombinatorX`, matching `attacks.combinator_crack`. `--separator` was added because `hcatCombinatorX` is the only one of the three that can insert one, so without it that path was unreachable.
+- **`spoonman --rule-coverage` is restricted to 50, 75, 95 and 99.** Those are the only capped rule files `rulegen` derives. Any other value named a `rules.topN.rule` that never exists, which missed the cache check on *every* invocation (re-running the whole O(corpus) derivation each time) and then fell through `capped_rules.get(N, rules_path)` to the full rule set — so an operator asking for a small rule set silently got the largest one, repeatedly and expensively.
+- **`adhocmask --mask` rejects a mask file that does not exist.** hashcat accepts a literal mask and a `.hcmask` path in the same slot and treats an unopenable path as a literal mask, so a typo enumerated one nonsense candidate and exited 0 — indistinguishable to a scripted caller from an attack that ran and found nothing. The interactive path already checked; this one now does too.
+- **`adhocmask` validates its increment bounds and can increment over the full keyspace.** A non-numeric bound reached `int()` unguarded and exited with a traceback instead of exit 1, and a non-positive one was forwarded to hashcat verbatim. Bounds are now checked the way `attacks._prompt_length` checks them. Separately, `--increment` was added: deriving increment from the bounds alone made "increment across the full keyspace, both bounds blank" — a state the menu can produce and hashcat supports — unreachable from a script.
+- **`bandrel --company` is validated against the comma-split it actually feeds.** `--company ","` passed a non-blank check while contributing no basewords at all.
+- **A comma-separated Bandrel company list no longer builds a mask from a leading space.** `"Acme, Globex"` split to `" Globex"`, whose first character is a space, and the per-baseword masks are derived from `name[0]` and `name[1:]` — so the second company produced `-1  ` and a mask matching nothing. Latent before now, since the prompt made multi-company input awkward; the new `--company` flag documents comma separation, which would have made it routine. Entries are stripped and blanks dropped.
+- **`test_commitizen_pin_is_still_coherent` no longer asserts *which* commitizen version is pinned**, only that exactly one exact `commitizen==X.Y.Z` pin exists. The literal it compared against meant every Dependabot bump of commitizen failed CI and needed a matching edit to the test before it could land (PR #322). Neither invariant the test documents -- that a pin exists so `cz commit` keeps working locally, and that neither tagging workflow calls `cz bump` -- depends on the version number, so the literal bought nothing.
+
+### Fixed
+- **`tests/test_rule_oracle.py` now reads `--stdout` through a framing decoder, so it passes against current hashcat (#337).** Upstream commit `836f11de1` (2026-09-20, shipped in `v7.1.2-754`) made `--stdout` wrap a candidate in `$HEX[...]` whenever `need_hexify()` asks for it, fixing a real defect: a candidate holding an LF used to become two lines that no reader could reassemble, so piping `--stdout` into another hashcat fed it two words. The oracle compared the raw stream, so all 15 of its real-hashcat assertions went red on any machine with a current hashcat -- while staying green in CI, which has no hashcat and skipped them. That is the dangerous combination: the only environment that exercises `derive()` against the real rule engine was the one where a genuine regression had become indistinguishable from the noise. Both framings are accepted, since pinning either one alone breaks against the other, and `--outfile-autohex-disable` does not reach this path. The decode is unambiguous because `need_hexify()` calls `is_hexify()` first, so hashcat wraps a literal `$HEX[41]` too. Nine new decoder cases run without hashcat, giving CI its first coverage of this file at all.
+- **Removed a vestigial `sys.path` insertion from `hate_crack/main.py` (#335).** The block put the *package* directory on `sys.path` while its comment claimed it was the project root, and nothing depended on it: every import in the module is stdlib or an absolute `hate_crack.X` import, and the HashcatRosetta path insertion is independent. Leaving it in place silently changed import resolution for everything loaded afterwards in the process, so a flat module shadowing a stdlib name inside the package would have been picked up ahead of the real one. Follow-up to the `__path__` shim removal in #298.
+
+### Removed
+- **The Textual full-screen backend (`ui_backend=textual`), which shipped only in nightly release candidates.** `hate_crack/ui/app.py`, `TextualUI`, the `run_textual` worker model and the `UI.run_terminal` / `supports_readline` seams that existed only for it are gone; `rich` and `plain` are the backends. The six terminal-owning call sites call their subprocess directly again. `ui_backend=textual` is still accepted so an existing config keeps starting: it runs `rich` and prints a one-line notice to update the setting (`hate_crack.ui.RETIRED_BACKENDS`). `textual` is no longer a direct dependency, though `atomic-agents` still pulls it in.
+
+## [2.37.0] - 2026-09-21
+
+### Added
+- **The Hashview "Download Rule" prompt now accepts `a` (or `all`) to download every listed rule.** The rule listing is printed directly above the prompt, so an operator who has just decided they want all of them had to back out to the menu and pick "Download All Rules" instead. The shortcut is case-insensitive, skips the output-filename prompt, and reuses the same per-rule reporting as the menu option -- both paths now share one summary helper, so their output cannot drift.
+- hashcat brain support for slow hash modes. Brain engages automatically on
+  any mode hashcat itself reports as slow, de-duplicating candidates across
+  sessions, and leaves a fast mode alone unless its mode number is listed in
+  `brain_modes_force`. Configurable via the `brain_*` keys in config.json and
+  `BRAIN_PASSWORD` in .env; disable with `--no-brain`.
+
+### Changed
+- **Downloading a newer Hashmob found corpus now removes the older same-tier copies it supersedes, without prompting.** The official wordlist listing only ever publishes the newest dated release (`hashmob.net_<date>[.<tier>].found.7z`), and each release is additive over the previous one, so keeping the old file wastes space for candidates that are all present in the new one. After a file is downloaded and extracted -- or found already present -- the download flow scans the wordlists directory for older files of the same tier (a `tiny` list never touches `huge`, and the tier is matched as a whole token so `large` never matches `larger`) and deletes them. Two conditions gate every deletion and are the whole safety story in place of a prompt: the new file must be present and non-empty in the wordlists directory, so an interrupted download or a failed extraction removes nothing, and it must be *strictly larger* than the file it would replace, since a cumulative corpus only ever grows and a replacement that is not bigger is treated as suspect. The size check is per file, so one anomalous old copy is kept without protecting the rest, and each kept file is reported with both sizes.
+
+### Fixed
+- **`hate_crack/main.py` no longer sets `__path__`, which fixes the `mock.patch("hate_crack.main.llm.X")` module-duplication hazard from #276 at its root instead of only detecting and repairing it.** The shim made a plain module look like a package to the import system, so a string-target patch through `hate_crack.main` was resolved by `pkgutil.resolve_name` as an *import* of `hate_crack.main.llm` -- a second, independent copy of `llm.py` that stayed permanently attached as `hc_main.llm` for the rest of the pytest session, even after the patch's `with` block exited. `main.py` has no relative imports and nothing loads it by path outside a non-package-named spec load in `tests/test_help_before_build.py`, where `__path__` bought nothing, so the shim had no purpose left to serve. The `_guard_submodule_identity` conftest fixture from #276 stays in place as a belt-and-braces net for any future regression. (#298)
+- **Hashview requests now verify the server's TLS certificate by default instead of accepting any certificate unconditionally.** `HashviewAPI.__init__` hardcoded `self.session.verify = False` and called `urllib3.disable_warnings(...)` on every construction, silently disabling certificate verification for all Hashview traffic and leaking the warning suppression process-wide to unrelated Weakpass and Hashmob requests that never asked for it. A new `HASHVIEW_VERIFY_TLS` `.env` key (default `true`) controls it; `disable_warnings` is now called only when verification is off, and a one-line warning naming the host is printed once per process in that case. Anyone pointing at a Hashview with a self-signed or internal-CA certificate needs one new `.env` line (`HASHVIEW_VERIFY_TLS=false`) to keep working. (#329)
+- **Rule generation no longer writes a blank line into basewords.txt for a cracked plaintext made up entirely of CR/LF bytes.** hashcat hands such a plaintext over hex-wrapped (`$HEX[...]`), and deriving its baseword strips every CR/LF byte before the rule is built -- leaving nothing behind when the whole password was breaks. The existing unwritable-baseword guard only checks whether the baseword still *holds* a break byte, and an empty string holds none, so it sailed through and got written as an empty line, one entry short of a full word. These are now skipped and counted under a new `empty basewords` statistic, reported in `coverage.txt` and the console summary alongside the existing `unwritable basewords` count, which covers the separate case of a break byte that could not be lifted out at all. (#304)
+- **The attack-coverage prompt no longer fires when nothing it could skip has ever been covered.** `_prime_coverage_decision` asked the store whether this attack had run against this hash file with any of these wordlists, but not whether it had run against the *dimension* about to be diffed. Coverage keys are keyed by kind, so a rule-less dictionary pass records `kind="wordlist"` keys that can never cover a `kind="rule"` key — yet one such pass made every later Quick Crack with rules announce "has run against this hash file before" and offer to skip rule lines of which exactly zero were covered. Answering either way changed nothing; the prompt was pure noise, and worse, it trains the operator to dismiss a prompt that elsewhere does real work. `has_prior_run` now takes a `kind`, and the priming call passes the dimension each selected chain will actually filter. The mirror case — a rule-less batch after only rules have run — is closed by the same change.
+- **The batch prompt no longer names "the 1 selected rule file" for a run that selected no rules.** Choosing "0) To run without any rules" sends a batch of one empty chain, which filters whole wordlists; the prompt now asks about wordlists in that case.
+- **The documentation-audit hook now returns JSON that Claude Code actually reads, so the audit can fire at all.** `.claude/hooks/doc-audit-trigger.sh` emitted a *top-level* `additionalContext` key, but for a `PostToolUse` hook that key is only read from inside `hookSpecificOutput`, and only when that object also carries `hookEventName`. An unrecognized top-level key is discarded with no error, no stderr, and a zero exit — so every link in the chain looked healthy (the warning printed, the grep matched, the hook emitted its JSON) while nothing was ever injected into context. The detection half was covered by `tests/test_doc_audit_parity.py`; the emission half was covered by nothing, which is why this survived a claimed end-to-end verification. `tests/test_doc_audit_hook.py` now pins the envelope, and asserts the top-level key is *absent* so the broken shape cannot pass.
+
+## [2.36.2] - 2026-09-10
+
+### Fixed
+- **`--update`/`--nightly` no longer refuses to run because of untracked files the operator never created.** The pre-upgrade dirty check ran `git status --porcelain --ignore-submodules=dirty`, which reports untracked files as well as tracked edits, and aborted on any output. That guard exists to protect the `git checkout -B` below it, and the checkout only aborts on *tracked* modifications — untracked files survive it untouched — so gating on them protected nothing while blocking auto-upgrade permanently. Running hate_crack from a checkout reliably creates them: `.DS_Store` appears after a single Finder visit on macOS, and `hashcat/rules/` is the shipped `rules_directory` default that the rule and mask downloads write into. Neither was covered by `.gitignore`; `.DS_Store` is ignored on a developer machine only through a personal global excludesfile, which does not clone, which is why this reproduced on operator installs and nowhere else. The check now passes `--untracked-files=no`. The one untracked file that can genuinely lose data — one sitting at a path an incoming commit adds — is still caught, by `checkout -B` itself, whose error names the file and is already surfaced.
+- **The auto-upgrade refusal now lists the changed files instead of only saying there are some.** "Commit or stash them, then re-run" was unactionable when "them" was never named, which mattered most on exactly the machines hitting the bug above. The listing is capped at 20 entries so a large diff cannot bury the instructions under it.
+- `.DS_Store` and `hashcat/` added to `.gitignore`, so neither can be staged by a `git add -A` in a checkout.
+
+## [2.36.1] - 2026-09-02
+
+### Fixed
+- **CrackTailer now seeks to EOF synchronously in `start()` instead of on the background thread.** A race in the notification system caused a line written to the `.out` file between `start()` returning and the thread's first execution to be silently dropped, never triggering a notification. Surfaced by Dependabot PR #317's CI failure on a starved runner; the test `test_no_username_falls_back_to_attack_name` randomly won/lost the race depending on scheduling. The race is unrelated to the `atomic-agents` version bump; seeking synchronously in the caller's thread eliminates it entirely. (#317)
+- **Hashfile uploads to Hashview now lowercase a raw hex ciphertext before sending it, so uppercase hashes are no longer silently dropped on the server.** Hashview keys every hash lookup on `md5(ciphertext)` computed in Python (`utils.py:import_hash_only`), which makes the comparison case-sensitive regardless of the column's collation. It intends to fold hex modes to lowercase on import, but the guard reads `hash_type in ('300', '1731', '1000')` while the upload route declares `<int:hash_type>` — so on the API path the comparison is `int` against `str`, never matches, and the ciphertext is stored in whatever case it arrived in. (The web UI is unaffected: WTForms hands over a `str`.)
+
+  The consequences were both silent. An uppercase hash misses the import-time dedup, so a copy already cracked on the server is not recognised and `instacracked` comes back `0`; then the agent cracks it and reports the ciphertext back **lowercased** — hashcat re-encodes hex digests rather than echoing the input casing — so the result lookup misses the uppercase row, the plaintext is discarded, and the hash stays `cracked=0`. Neither failure raises anything client-side.
+
+  `upload_hashfile` now normalises each line through `_normalize_hashfile_line()` before both the wire body and the skip-list cache key. It folds only ciphertexts that are wholly hex (optionally `0x`-prefixed, as MSSQL 2012 writes them) under one of nine raw-hex modes — 0, 100, 300, 900, 1000, 1400, 1700, 1731, 3000 — so case-significant formats such as bcrypt's `$2B$` variant, base64 digests and the `$DCC2$` marker are left alone. **For `user:hash` (format 4) only the field after the first colon is touched**: Hashview stores the username verbatim and feeds it to the "(DYNAMIC) All Usernames" wordlist, so folding its case would pollute that list. pwdump (format 0) is skipped entirely because Hashview's pwdump branch lowercases the NT field itself, and NetNTLM/kerberos/shadow (1/2/3) because their lines are not a bare digest.
+
+  The cache key is now computed from the normalised line, so the same hash uploaded in either case is recognised as one hash rather than two. **Normalisation runs on bytes, not text**, which matters more than it looks: an AD username can carry arbitrary non-UTF-8 bytes, and decoding the line first would either drop them (`errors="ignore"`) or produce lone surrogates that `hashview_cache.cache_key` cannot encode, turning a working upload into a `UnicodeEncodeError`. Lowercasing ASCII hex needs no decoding at all, so the wire body keeps the original bytes.
+
+- **A hashfile line whose username carries non-UTF-8 bytes is no longer silently skipped as already-uploaded.** Found while fixing the above. The upload skip-list keyed on `line.decode("utf-8", errors="ignore")`, which drops the offending bytes, so two distinct accounts differing only there — `caf\xe9.user` and `caf\xff.user` — collapsed onto one cache key. The second upload reported "Skipped 1 hash(es) already uploaded previously" and that account's hash never reached the server. The key now decodes with `latin-1`, which maps every byte to a distinct code point and always re-encodes cleanly. ASCII lines decode identically either way, so existing cache entries are unaffected.
+
+  This is a client-side workaround for a server-side defect, and it stays correct once the server is fixed. Hashes uploaded uppercase **before** this change are still stranded on the server and need re-uploading.
+
+## [2.36.0] - 2026-09-01
+
+### Added
+- **The Hashmob archive picker now takes `a` (or `all`) to download every listed archive.** Picking them off one index at a time meant answering the large-download confirmation once per archive, and the yearly corpora are 2.4-9.8 GB apiece — a dozen identical prompts is how an operator stops reading the question. New `download_all_hashmob_archives(entries, out_dir=None)` takes **one** aggregate confirmation naming the archive count and the summed `file_size` (or "unknown total size" when the listing omits it), then downloads each entry through `download_hashmob_archive` with a new keyword-only `confirm=False` that suppresses the per-archive prompt. A non-tty context declines, same as the single-archive path.
+
+  Downloads are sequential, not parallel: at these sizes concurrency only splits the same bandwidth while multiplying the disk footprint of a partial batch. A failed or raising download is counted and the batch continues, and the function returns `{"succeeded", "failed", "skipped"}`. **An archive already on disk at its listed size is skipped; one whose size does not match is re-downloaded**, since a truncated file from an interrupted run is the likelier explanation — and one with no listed size is skipped, because nothing local can tell those two cases apart. The single-archive path is unchanged, including its own confirmation.
+
+### Changed
+- **Dependency bumps: `atomic-agents` >=2.10.1, `python-dotenv` >=1.2.3, `ruff` ==0.16.4, `ty` ==0.0.74.** Landed as one commit rather than four Dependabot merges: all four branches edit `pyproject.toml` from the same base, so once one lands the rest are no longer fast-forwardable, and the `ruff`/`ty` pins sit on adjacent lines and conflict outright. One relock and one gate run covers them together. (`uv.lock` is gitignored here, so none of the PRs carried one.) Neither toolchain bump changed a gate's verdict: `ruff format` reformats nothing at 0.16.4, and `ty` 0.0.74 still reports 56 warning-level diagnostics and no errors.
+
+  **The proposed `openai` >=3.3.1 bump was not taken, and cannot be.** `instructor` still caps `openai>=2.0.0,<3.0.0` at its own latest (1.16.0), so `uv lock` fails outright with an unsatisfiable-requirements error rather than resolving to something untested. This is the fourth time Dependabot has proposed it; the bump becomes possible only when `instructor` widens that cap upstream.
+- **Dependabot no longer proposes an `openai` major bump**, which it had done four times (most recently #309). `.github/dependabot.yml` gains an `ignore` entry for `openai` scoped to `version-update:semver-major`, so 2.x patch and minor bumps keep flowing — deliberately narrower than the neighbouring `instructor` entry, where the exact `==1.14.5` pin makes even a patch unsatisfiable. The comment records **both** upstream conditions that must clear before the entry comes out: `atomic-agents` currently pins `instructor==1.14.5` exactly, so relaxing the `openai` cap in `instructor` alone would not be enough. Note that Dependabot reads this file from the **default branch**, so the entry takes effect when it reaches `main`, not on `nightly-dev`.
+
+## [2.35.0] - 2026-08-31
+
+### Added
+- **Hashmob's yearly archive corpora and per-mode combined-left lists are now reachable from a new "Hashmob Downloads" submenu (item `11` under Wordlist Tools).** `GET /api/v2/archive` returns a dict keyed by year (`"current"`, `"2021"`...`"2025"`), each a list of `{"name", "url"}` entries for the yearly full-found corpora — **2.4-9.8 GB compressed (~31 GB extracted)** per the live listing. New `list_hashmob_archives()` flattens that into a globally-numbered, year-grouped listing and returns it so a caller can resolve a printed index back to a URL. New `download_hashmob_archive(entry_or_file_name, out_path=None)` resolves the URL from a listing entry's `url` field (or constructs `https://hashmob.net/api/v2/archive/{file_name}` from a bare name), follows the same auth/limiter/backoff pattern as the other Hashmob downloads, and — because these are tens-of-GB files — prints the size and requires an explicit `y`/`N` confirmation before starting; a non-tty context (matching the `_safe_input` pattern already used by `list_and_download_hashmob_masks` and friends) declines the download rather than either blocking or starting it silently. A `.7z` result is handed to `extract_with_7z`, same as `download_official_wordlist`.
+
+  `GET /api/v2/downloads/combined_left` returns `{"combined_left_files": [{"mode", "hash_count", "algorithm", "time", "updated_at"}]}` — one entry per hashcat mode. New `list_hashmob_combined_left()` parses and prints it (`f"{mode}: {algorithm} ({hash_count:,} hashes, updated {updated_at})"`) and returns the parsed list. New `download_hashmob_combined_left(mode, out_path=None, *, variant="all")` picks between `/downloads/combined_left/{mode}` (`variant="all"`, default), `/downloads/official_combined_left/{mode}` (`"official"`), and `/downloads/combined_left_premium/{mode}` (`"premium"`), raising `ValueError` on any other value. **`out_path` defaults to a file inside `get_hcat_wordlists_dir()`** when not given — these are left-hash lists (uncracked hashes for a mode), not conventional wordlists, but they resemble wordlists in downstream use (fed to further attacks the same way a cracked-word corpus would be); worth revisiting if that default stops making sense as usage patterns settle.
+
+  `GET /api/v2/downloads/research/torrents` (404 live) and `GET /api/v2/passwords/range/{range}` (500 live) remain out of scope — both are broken server-side and nothing was built against them.
+- **Hashmob's mask files are now reachable from the rule-tools submenu and, optionally, `--hashmob-masks`.** `GET /api/v2/resource` has always returned `"type": "masks"` entries (`rockyou-{1-60,...,7-2592000}.hcmask`, `hashcat-default.hcmask`, etc.) alongside wordlists and rules, but neither listing function filtered for them, so they were unreachable. New `download_hashmob_mask_list()` filters `type == "masks"` (the live response carries duplicate `file_name` entries for three of them; deduped, keeping the first occurrence) and prints the same size/line-count detail the wordlist and rule listings already show. `download_hashmob_mask(file_name, out_path)` downloads from `https://hashmob.net/api/v2/downloads/research/masks/{file_name}` with the same auth/limiter/backoff pattern as `download_hashmob_wordlist`. `list_and_download_hashmob_masks(masks_dir=None)` mirrors the rule download flow's selection parsing (`1,3,5-7` / `a` / `q`), parallel `ThreadPoolExecutor` downloads, and skip-existing dedup, defaulting to `<hate_path>/masks` — the same directory `adhoc_mask_crack`'s file picker already autocompletes against, so no new config key was added. Wired as item `6` in `rule_tools_submenu` and, since it fit the existing pattern cleanly, as the optional `--hashmob-masks` CLI flag alongside `--hashmob`/`--rules`.
+
+### Changed
+- **Masks are no longer nested under Rule File Tools — they're their own top-level "Mask Tools" menu, option `83`.** The mask download (previously item `6` in `rule_tools_submenu`, option `81`) moved to a new `mask_tools_submenu` at main-menu option `83`, alongside Wordlist Tools (`80`) and Rule File Tools (`81`). `rule_tools_submenu` is back to its original 5 items. The reduced "no hash file provided" menu also gained "Mask Tools" as item `4` (masks, like wordlists and rules, don't require a hash file), pushing "Exit" to `5`.
+- **A dynamic Hashview wordlist downloaded without an explicit filename now auto-names itself from the wordlist's name plus today's date** (e.g. `NTLM_Ciphertexts-2026-08-31.txt.gz`) instead of hardcoding `dynamic-all.txt.gz` for id 1 and a meaningless random scratch name (the server's per-request `secrets.token_hex(8).gz`) for every other dynamic list. Repeated downloads of the same dynamic list now sort chronologically and don't collide.
+
+### Fixed
+- **Attack coverage filtering no longer crashes a large rule-file run with `OverflowError: string longer than INT_MAX bytes`.** `CoverageStore.covered()` serializes its whole probe key set (rule-file lines × wordlist fingerprints, a cartesian product) into a single JSON string and binds it as one SQLite parameter; against a big rule file run over many large wordlists that string can exceed CPython sqlite3's ~2 GiB per-parameter bind limit, which raises `OverflowError` rather than `sqlite3.Error`. The store already had a slower, unbounded-size fallback (`_covered_via_temp_table`, added for a SQLite build missing the JSON1 extension) for exactly this shape of problem, but the `except` clause only caught `sqlite3.Error` and let `OverflowError` propagate and kill the attack. It now catches both.
+- **`list_hashmob_archives()` and `list_hashmob_combined_left()` no longer crash on an error payload, `download_hashmob_archive()` no longer trusts a server-supplied download host, and four more Hashmob listing calls now follow the module's own rate-limit/backoff pattern.** `GET /api/v2/archive` returns `{"message": "Unauthorized."}` for a missing/bad API key — the realistic case for a fresh install — and both listing functions iterated that shape unguarded, raising `AttributeError` (`str.get` on a character) all the way up through the Hashmob Downloads submenu and killing the process. Both now validate the parsed payload's shape (a dict of lists for archives, `combined_left_files` being a list for combined-left) before iterating, print an error, and return `[]` instead, matching every other listing function's convention. Separately, `download_hashmob_archive` sent the `api-key` header to whatever host a listing entry's `url` field named, with no check that it was actually Hashmob's; a new `_is_hashmob_host()` helper (`hashmob.net`/`www.hashmob.net`, case-insensitive) gates that, falling back to the constructed `https://hashmob.net/api/v2/archive/{file_name}` URL when the entry's `url` doesn't pass. `download_hashmob_wordlist_list`, `download_hashmob_rule_list`, `download_hashmob_mask_list`, and `list_and_download_official_wordlists`'s listing request now call `_hashmob_limiter.wait()` and go through `_with_hashmob_backoff`/`_Hashmob429` on a 429, same as every other Hashmob HTTP call — these are the endpoints a browsing user hits most, so they were also the most likely to actually 429 with no retry. Also: `list_hashmob_archives()`'s flattened entries now keep every field from the source entry (not just `year`/`name`/`url`), and a malformed `Retry-After` header (e.g. `-1`) is now clamped to `0.0` instead of reaching `time.sleep(-1)` and raising `ValueError`.
+- **Hashmob 429 backoff now honors the server's `Retry-After` header, and the wordlist/rule listings now show file size and line count.** `_with_hashmob_backoff` previously always slept its fixed ladder (30, 60, 120, 240, 300s) on a 429, ignoring any `Retry-After` the server sent. `_Hashmob429` now optionally carries a `retry_after: float | None`, populated at every raise site (`download_hashmob_wordlist`, `download_hashmob_rule` — both its primary and fallback-URL attempts, and `download_official_wordlist`) from `resp.headers.get("Retry-After")` when present and parseable; `_with_hashmob_backoff` sleeps `min(retry_after, max_delay)` for that attempt when it's set, while the ladder still advances underneath for any later attempt that gets a 429 with no `Retry-After`. Separately, `download_hashmob_wordlist_list()` and `download_hashmob_rule_list()` used to discard each resource's `file_size` and `line_count`; entries now read like `1. rockyou (133.4 MB, 14,344,391 lines) - classic` via a small shared `_format_size`/`_listing_detail_suffix` helper, with the size and/or line-count clause omitted when the field is missing or zero.
+- **`download_hashmob_rule` now derives its download URL from the live `/api/v2/resource` listing instead of an ~80-entry hand-maintained table.** New rules Hashmob adds required a code edit to a `hashmob_rule_urls` dict before they could be downloaded, and the dict's own contents could drift from what the API actually serves. `download_hashmob_rule(file_name, out_path, resource_type=None)` now builds the primary URL from the resource's `type`: `"official_rule"` → `https://hashmob.net/api/v2/downloads/research/official/hashmob_rules/{file_name}`, `"rule"` (or unrecognized) → `https://www.hashmob.net/api/v2/downloads/research/rules/{file_name}`. `list_and_download_hashmob_rules` now threads each resource's `type` through to `download_hashmob_rule` instead of only its `file_name`. The existing 404-on-primary → official-alternate-URL retry is unchanged as a safety net. `hashmob_rule_urls` is deleted.
+- **The official-wordlist download path now authenticates, throttles, and honors the caller's output path.** `list_and_download_official_wordlists()` listed `/api/v2/downloads/research/official/` with no `api-key` header, and `download_official_wordlist(file_name, out_path)` silently discarded `out_path` in favor of `sanitize_filename(file_name)` and sent its own request with no auth header, no `_hashmob_limiter` throttle, and no 429 backoff — an anonymous request to an official `.7z` gets a `302` to the quota/permission page instead of the file. Both functions now send `{"api-key": key}` when `get_hashmob_api_key()` is truthy, and `download_official_wordlist` routes its download through the same limiter/backoff pattern as `download_hashmob_wordlist`, and now writes to a caller-supplied `out_path` when one is given (falling back to `sanitize_filename(file_name)` under the configured wordlists directory only when it's omitted). `list_and_download_official_wordlists`'s own calls were updated to stop passing a redundant `out_path` so its existing on-disk naming is unchanged. `download_official_wordlist` also now sniffs the response `Content-Type` for the `text/plain` quota/permission HTML page and follows its embedded meta-refresh redirect (or fails cleanly instead of writing the HTML body to disk), matching the defense `download_hashmob_wordlist` already had.
+- **`fetch_torrent_metadata()` no longer sends the Hashmob API key to weakpass.com.** The Hashmob API credential must not be leaked to unrelated services; it was being added to the headers for all weakpass.com requests (listing and download). The fix removes the key injection entirely from that function — other call sites of `get_hashmob_api_key()` already target only hashmob.net.
+- **Downloading a *dynamic* Hashview wordlist (Usernames, Customers, NTLM ciphertexts, per-length "Recovered Passwords" buckets) no longer times out, and now tells the operator why it's about to sit silent.** `GET /v1/wordlists/<id>` regenerates a dynamic list from the database and gzip -9s it before sending a single response byte, so `requests`' scalar timeout has to cover server-side build time, not transfer time. `download_wordlist()` used to key that timeout off `int(wordlist_id) == 1` and reuse `HASHVIEW_DOWNLOAD_TIMEOUT` (300s), which was still too short for a large corpus. It now resolves the wordlist's real `type` via the existing listing call, applies a new `HASHVIEW_DYNAMIC_DOWNLOAD_TIMEOUT` (1800s) to any dynamic row rather than just id 1, and prints a notice before issuing the request so the wait isn't indistinguishable from a hang. A failed type lookup falls back to the old id==1 heuristic rather than blocking the download.
+- **`upload_cracked_hashes` no longer silently drops a plaintext it can't validate, and auto-repairs a known class of historical corruption instead of just skipping it.** A line that failed client-side validation (mode/hash mismatch) used to print at most 10 examples and then vanish; it's now written in full to `<file>.rejected` alongside the upload. Separately, `07c2f15` (2026-08-03) had already fixed a bug in `_wire_field_bytes` that double-encoded an already-valid-UTF-8 NTLM `$HEX[...]` plaintext (`café` became `cafÃ©`) before it reached Hashview — but plaintexts uploaded *before* that fix are still sitting corrupted in Hashview, and get pulled back into the local hashcat potfile via the found/potfile merge path, where hashcat replays them as "already cracked" forever without ever re-verifying them. `upload_cracked_hashes` now recognizes that exact corruption shape, reverses it, re-validates the recovered plaintext against the hash, and uploads the corrected value when it checks out. When given `potfile_path` (both CLI call sites now pass the configured `hcatPotfilePath`), it also patches a repaired entry in place in the local potfile and strips an unrecoverable one entirely, so hashcat stops re-serving a plaintext already proven not to match its hash.
+
+### Documentation
+- **Documented `LLM_BACKEND` and `LLM_API_KEY` in the README, and stopped framing the `OLLAMA_*` keys as Ollama-only.** Both new keys were absent from the README entirely, and the surrounding text still read as though the LLM attacks only talk to Ollama — so an operator pointing hate_crack at vLLM had no documented way to find the selector or the credential. The `.env.example` section header (generated from `config_writer._GROUPS`, not hand-edited) called the block "Ollama-backed AI research" while the keys under it govern all three backends; it now says so and notes that vLLM commonly listens on `:8000`, since `OLLAMA_HOST`'s default is Ollama's port. The README's "Ollama Configuration" heading is now "LLM Configuration", and the one cross-reference to it was updated with it. CLAUDE.md's `.env` key count was also stale (14, actually 16).
+
+## [2.34.0] - 2026-08-27
+
+### Changed
+- **The default Ollama model is now `qwen3:4b-instruct`** (was `qwen2.5:32b`). The 32B default needed roughly 20 GB of VRAM to run at a usable speed, which put the LLM Attack out of reach on most machines that otherwise run hate_crack fine. `OLLAMA_MODEL` in `.env` still overrides it, so an existing configuration is unaffected — only a fresh install sees the new default.
+
+### Fixed
+- **Listing a customer's Hashview hashfiles no longer sweeps 26 hash types, and no longer reports a timed-out type as "this customer has none".** Retrieving customer files against a populated Hashview was slow *and* silently wrong, and the two symptoms were one bug.
+
+  `get_all_customer_hashfiles()` prefers `GET /v1/customers/<id>/hashfiles` — one request, filtered server-side, every hash type covered. Servers predating that route (added upstream 2026-07-21) 404 it, and the client then swept all 26 `COMMON_HASH_TYPES` against the type-scoped listing route unconditionally. That route's cost scales with the number of *hashes* of the type, not the number of files, because the server computes total/cracked counts per hashfile. Measured against a production instance: 73 small NetNTLMv2 captures listed in 0.6s, while 54 NTDS dumps holding 7.85M hashes took **549 seconds** to produce 13 KB of JSON.
+
+  The 30s client timeout therefore always expired on NTLM, and the sweep's `except Exception` read `e.response.status_code`, which is `None` for a timeout — so it was not the 404 `break` and fell through to `continue`. Net effect, measured end to end: ~39s of waiting, followed by a hashfile list missing every NTLM file, presented identically to a customer that genuinely has none. Since NTLM is where domain dumps land, the answer was usually empty and always unmarked.
+
+  Four changes. A timeout is now caught separately from an HTTP error, recorded in `last_listing_timeouts`, and reported on stdout rather than debug-gated; the sweep abandons after two timed-out types instead of spending the budget 26 times. The interactive path goes through a new `main._list_hashfiles_for_customer()`, which uses the one-request route when it exists and otherwise asks which hash type to enumerate — defaulting to 1000, with `A` for the full sweep (warned as slow) and `S` to skip straight to entering the hashfile ID. The listing timeout is now its own constant, `HASHVIEW_LISTING_TIMEOUT`, deliberately **not** raised above the default: no usable timeout rescues a nine-minute query, so a larger budget would only make the failure slower to arrive.
+
+  And **a hashfile ID typed in by hand is no longer refused just because it is absent from a partial listing.** The menu validated the ID against whatever was listed, which was correct when the listing covered every hash type and wrong the moment it did not: a sweep of one type leaves a non-empty list holding none of the customer's other files, so the ID the operator had just been told to read off the web UI was rejected with "Hashfile ID not in the list" and `Q` was the only way out. `_list_hashfiles_for_customer()` now returns whether the listing is exhaustive — only the customer-scoped route is — and the extracted `main._prompt_hashfile_id()` enforces membership only then.
+
+  Verified against the same production instance: skip answers in 0.4s, a fast type returns 6 real hashfiles in 1.0s, and NTLM fails in 30.4s naming the type and telling the operator to read the ID off the web UI — where before it took 39s to say nothing.
+
+  **The underlying cost is a server-side N+1 and is not fixed here.** Both Hashview listing routes, and the web UI's own hashfiles page, run two `COUNT` queries per hashfile inside a Python loop; one `GROUP BY hashfile_id` would replace all of them. Deploying a server that has the customer-scoped route also bypasses the sweep entirely.
+
+- **A line break past addressable position 35 no longer makes a Spoonman baseword unwritable — the rule reverses the word and inserts from the other end.** This half of the residual gap recorded in issue #295 was documented there and in the code as unavoidable, "a genuine limit of hashcat's rule language, not a missing feature." That was wrong, and the correction is one op: positions are encoded in a 36-character alphabet, so `i` cannot address past index 35 *counting from the left*, but `r` reverses the word, and a break in the last 36 characters is addressable once reversed. Insert it there and reverse back.
+
+  Verified against hashcat v7.1.2 rather than reasoned about, because the claim being replaced was itself reasoned about: for a 40-character baseword, `r i2X r` puts `X` at index 38, byte-identical to Python's slicing, and `r i2\x0a r` does the same for an escaped newline. Three cases were added to `tests/test_rule_oracle.py`, which hands each derived pair to `hashcat --stdout` and compares bytes — an off-by-one in the reversed index is caught by the binary, not by our own reference implementation agreeing with itself.
+
+  The forward form is still tried first and is unchanged for every password it can already express, since the reversal costs two extra functions. `r` had to be taught to `count_ops` and `apply_rule`, which would otherwise have raised on the module's own output; `validate_rule` already accepted it.
+
+  **What remains is genuinely unreachable**, and the counter, the `coverage.txt` note and the operator warning were all reworded to name it precisely: a frame is chosen per *password*, not per break, so one frame has to hold every break — a password with one break outside the first 36 characters **and** another outside the last 36 is still skipped, as is one needing more inserts than the 31-function cap leaves room for, since each break costs one insert and the reversal costs two more. The cap boundary is now pinned in both directions and against hashcat: 29 inserts plus two `r` ops is exactly 31 functions and runs, 30 would be 32 and is declined here rather than dropped silently there.
+
+  Two things about that residual are easy to state wrongly. It is about **how far apart the outermost breaks are, not length**: 37 characters is enough to arrange it, with breaks at index 0 and 36. The intuitive figure of 72 is what a *single* unreachable break would need and is the wrong bound for the two-break case, which is why the tests now pin a 37-character example. And **case encoding keeps the old limit as stated** — an uppercase letter past index 35 still bails `derive()` out — because there a reversal would have to compose with every other op in the derivation rather than standing alone as the whole rule.
+
+  The tests that used a *trailing* break as their example of an unwritable baseword now use a two-ended password, because a trailing break is reversed-index 0, the cheapest position there is.
+
+- **Attack coverage bucketed every Quick Crack together, so a brand-new wordlist with previously-used rules was flagged as already covered (#302).** Two defects compounded, both reachable from the default answer at Quick Crack's wordlist prompt.
+
+  `_prime_coverage_decision` ignored the wordlists it was handed and asked the store only whether anything named "Quick Crack" had ever run against this hash file. Since a rule counts as covered only for the wordlist it ran against, selecting a fresh corpus produced "Quick Crack has run against this hash file before" with nothing recorded that could possibly be skipped. The question is now scoped to the wordlists, answered by a new `CoverageStore.has_prior_run()` against a new `run_wordlists` table — still without reading a single rule file, which is the property that prompt exists to preserve. Fingerprinting costs nothing extra overall, because `plan_run` computes the same memoized fingerprints moments later for the first chain.
+
+  The reason it never went away is that Quick Crack's default *is* a directory, and a directory has no content fingerprint — so every plan went inert, nothing was recorded and nothing was ever filterable, while the run was still logged and kept feeding the prompt. Quick Crack now expands a selected directory into the wordlists inside it, one level deep, the same fix `hcatHybrid` got for the same reason. hashcat reads exactly those files when handed the directory itself (verified against 7.1.2, which ignores subdirectories), so the candidate set is unchanged; it just becomes something coverage can key on. Dot-files and archives are dropped, which hashcat would not do — a Weakpass download leaves `.7z` and `.torrent` files in the wordlists directory and neither is a wordlist.
+
+  The expansion aborts the attack when it comes back empty — an empty wordlists directory, or one holding only subdirectories or only archives — instead of launching. Without a dictionary operand hashcat does not error: `-a 0` reads candidates from *stdin*, so the run would inherit the menu's terminal, consume the operator's keystrokes, and then report Exhausted on ctrl-D, which is exit 1, which is what records coverage. `hcatHybrid` already guarded its own expansion this way.
+
+  An existing engagement's store needs no migration and loses nothing: the new table arrives empty on the next connect, and an empty answer is "no prior run", which suppresses the spurious prompt rather than causing a wrong skip. `coverage forget` clears the new table too.
+
+### Added
+- **A "Download All Rules" option in the Hashview interactive menu.** Previously the menu could only download one rule file at a time by ID; the new option lists every rule the Hashview API knows about and downloads each one, reporting per-rule success/failure counts instead of aborting the batch on the first error. Backed by a new `HashviewAPI.download_all_rules()` method.
+
+## [2.33.1] - 2026-08-21
+
+### Added
+- **`CONTRIBUTING.md`, which the repo has never had.** Publishing `CLAUDE.md` made this urgent rather than merely nice: that file is written for maintainers and says, in four places, never to push a work branch or open a pull request for one. Correct for someone with push access whose branches merge locally — and, to the outside contributor who can now read it, indistinguishable from "this project does not accept pull requests." With no `CONTRIBUTING.md`, no issue template and no PR template, that was the only public statement of process.
+
+  It covers the things a contributor cannot infer: that pull requests target `nightly-dev` and not the `main` that GitHub preselects, since `main` holds the last released state and takes work only through a batch integration merge; the two exceptions that legitimately go straight to `main`; the setup and the exact gate commands; that a `[Unreleased]` changelog entry carrying its issue as `(#NNN)` is how closing keywords get assembled at release time; and where the six wiring steps for a new attack live. `CLAUDE.md` now scopes its no-pull-request rule to maintainers and points at the new file, so the two do not contradict each other.
+
+  It also leads with engagement data, because this tool's working files are somebody else's hash dumps and cracked passwords: no hashes, plaintexts, basewords, potfiles, NTDS extracts, or client-identifying hostnames in an issue, a PR, a fixture, or a pasted traceback.
+
+### Changed
+- **Fingerprint Attack runs its self-/dictionary-combination passes to convergence for an expander length before starting the secondary hybrid attack, instead of interleaving the two.** Previously `hcatHybrid` ran on every inner-loop pass alongside the combinator, re-running against a still-growing `.expanded` file. It now runs once per expander length, after the expand-and-combine loop has stopped finding new cracks from the combinator alone, so hybrid always sees the fully-expanded fragment set for that length rather than a partial one.
+
+- **The branching policy now says what the team actually does: a work branch may be pushed and normally gets a pull request against `nightly-dev`.** It previously said, in four places, that feature and fix branches stay local and never get a PR. That had quietly stopped being true — of the six most recent work-branch pull requests, all six targeted `nightly-dev` and five landed as fast-forwards, so the practice was settled and only the document was out of date. Publishing `CLAUDE.md` turned that staleness into a real problem, since an outside contributor reading "never open a PR" has no way to know the instruction was meant for people with push access.
+
+  **The invariant that mattered is unchanged and is now stated separately from the workflow:** however a change is reviewed, it lands as a local fast-forward, never through a GitHub merge button. That is not a stylistic preference — every work-branch PR merged through the UI (#247, #277, #278, #279) left a merge commit behind, and the three that also mis-targeted `main` bypassed batch integration as well. The revised section records those PR numbers as the evidence, so the rule reads as a conclusion rather than an edict.
+
+  Two operational notes were added from things that went wrong this week: a work-branch PR takes `--base nightly-dev` and never `--base main`, and a pushed branch should have its remote copy deleted after merging — two merged branches sat on the remote long enough to be mistaken for work in flight, and one of them had already landed under a different SHA after a rebase, which `git merge-base --is-ancestor` reports as unmerged. Identifying that case needs `git patch-id` or `git range-diff`. `CONTRIBUTING.md` was updated to match, since it had explained the now-deleted rule.
+
+### Fixed
+- **A potfile under any name but the two hardcoded ones was not gitignored.** `.gitignore` listed the literal `hashcat.pot` and `hashcat.potfile`, but `hcatPotfilePath` is a configurable setting — point it at `client.pot` or `engagement.potfile` and nothing matched. A potfile is a hash:plaintext list, so this was the same exposure as the artifacts alongside it with a different filename. Both spellings are now globbed (`*.pot`, `*.potfile`).
+
+  Notably `SECRET_ARTIFACT_PATTERNS` in `tests/test_repo_hygiene.py` had used the globs all along, so the suite would have caught such a file being *tracked* while `.gitignore` did nothing to stop it being *staged* — the test list and the ignore file had silently disagreed about the same rule. Three cases were added to the gitignore-coverage test to keep them in step. Found while fact-checking a claim written into `CONTRIBUTING.md`, which is the second gap of this shape in as many days after the raw NTDS extract.
+- **A raw NTDS extract was not gitignored, so a fresh clone would stage a domain-wide hash dump on `git add -A`.** Every file *derived* from one was already covered — `corp.ntds.nt` by `*.nt`, `corp.ntds.nt.out` by `*.out` — but `corp.ntds` and `ntds.dit` themselves matched nothing, and neither did an explicitly-named `users.hashes`. `*.ntds`, `ntds.dit` and `*.hashes` now join the cracked-artifact block.
+
+  This is the same gap the rest of that block exists to close, one step upstream and missed at the time: the artifacts were covered locally by a `*ntds*` line in `.git/info/exclude`, which is local-only and does not clone, so the protection existed on the machine that wrote the rule and nowhere else. Of 86 patterns in one operator's exclude file, 64 were already covered by the tracked `.gitignore` and the raw dump was the only genuinely dangerous remainder — the rest were engagement-specific names, or already-covered spellings, or too broad to ship.
+
+  **The patterns are deliberately narrow.** `*ntds*` and `*hashes*` would each swallow tracked source — `tests/test_upload_cracked_hashes.py` matches the latter — so the extension forms are used instead. That constraint is enforced rather than commented: the three patterns were added to `SECRET_ARTIFACT_PATTERNS` in `tests/test_repo_hygiene.py`, which asserts no tracked file matches any of them, so broadening one to a glob that catches real source fails the suite. Verified by mutation. Six new cases in the gitignore-coverage test check the raw spellings against a pristine clone rather than against a developer checkout, since the developer's own exclude file is exactly what masked this.
+- **The Spoonman corpus guards now compare filesystem identity instead of resolved-path strings, so a corpus offered back under a different capitalization is still recognized (#291), and the second guard no longer silently depends on the first running first (#292).** `_same_path` and `_path_contains` both compared `os.path.realpath` strings, and `realpath` normalizes symlinks, `./` prefixes and trailing slashes but does not fold case — so on a case-insensitive filesystem (APFS/HFS+ by default, FAT, some SMB/NFS mounts), a corpus re-offered as an extra wordlist under a differently-cased spelling produced two different `realpath` strings, missed the exact-match guard, and hashcat ran the corpus itself as a plain dictionary. Both functions are rewritten on `os.stat`/`os.path.samefile`/`os.path.samestat` identity, which asks the filesystem rather than a string and is case-agnostic by construction.
+
+  The rewrite also closes #292 in the same change, per that issue's own suggestion: `_path_contains` previously returned `False` for `container == target` exactly, since there was no trailing separator to match, so an exact-match corpus was only ever caught because `_same_path` happened to run first in `_spoonman_wordlists`. Reordering the two `if` branches there would have silently reopened the hole, and nothing tested each guard in isolation to say so. `_path_contains` is now naturally `True` when *container* and *target* are the same object, so the two guards are independently sufficient for the exact-match case and only the printed message depends on their order now, not correctness — recorded as a comment above each branch in `_spoonman_wordlists`.
+
+  New `TestSpoonmanCorpusGuards` in `tests/test_main_spoonman.py` exercises both functions directly: the #292 exact-match crux, containment at depth and its reverse, the sibling-prefix trap (`lists` not "containing" `lists2/found.txt`), a plain-file container answering `False` for everything but itself, a missing path answering `False` rather than raising, relative-target containment (load-bearing on the new `os.path.abspath` call — confirmed to fail without it), the case-differing corpus itself gated on a real filesystem probe rather than `sys.platform` so it skips cleanly on a case-sensitive filesystem, and `_spoonman_wordlists` called directly to assert the outcome is exactly the derived basewords regardless of which branch caught the corpus. The existing symlink/relative-form parametrization gained a `case_differing` case using the same probe.
+- **A string-target `mock.patch("hate_crack.main.llm.X", ...)` permanently corrupted `hate_crack.main`'s module references for the rest of the pytest session, a real exception-identity break rather than a cosmetic one (#276).** `hate_crack/main.py` sets its own `__path__` so it can be treated as a package when loaded standalone, which has a side effect nobody intended: a *string*-target patch through it is resolved with `pkgutil.resolve_name`, and `resolve_name` imports each dotted prefix as a real module rather than following the attribute `main.py` already bound. `mock.patch("hate_crack.main.llm.generate_candidates", ...)` therefore imports `hate_crack.main.llm` as a second, independent execution of `llm.py` — a distinct module object, with distinct classes — and the import machinery rebinds `hate_crack.main`'s `llm` attribute to it. Mock's teardown only restores the patched attribute *on that duplicate*; it has no way to know the rebinding happened at all, so the duplicate stays attached to `hate_crack.main.llm` for every test that runs afterward. Confirmed live before the fix: `hate_crack.main.llm.CloudDestinationRefused is not hate_crack.llm.CloudDestinationRefused` after a single such patch — an `except llm.CloudDestinationRefused` elsewhere in `main.py` would silently stop catching.
+
+  All 57 affected call sites (`tests/test_llm_pattern_rules.py`, `tests/test_hcat_ollama.py`, `tests/test_hcat_rosetta_mask.py`) are converted to `mock.patch.object(hc_main.llm, "X", ...)`, the idiom `tests/test_no_cloud_destination_main.py` already used correctly — an attribute patch on the module object itself, which needs no import resolution and therefore can't duplicate anything. `tests/conftest.py` gained an autouse `_guard_submodule_identity` fixture as the durable mitigation: after every test it walks `hate_crack.main`'s own attributes for any that are modules whose canonical `sys.modules` entry exists and differs, fails that test by name with a message pointing at the fix, and repairs the rebinding and clears the stray `sys.modules` entry regardless of pass/fail — the corruption belongs to the test that caused it, not to whichever unrelated test runs next and inherits a poisoned reference. The module list is computed from `hate_crack.main`'s live attributes rather than hardcoded, so it covers every current sibling module and anything added later without upkeep. `tests/test_submodule_identity_guard.py` proves the guard is load-bearing rather than decorative: it deliberately reproduces the corruption and confirms the check function both detects and repairs it, confirms the repair clears the `sys.modules` entry (not just the attribute), and runs the recommended idiom as a positive control that produces zero findings.
+
+  Left open on purpose: `main.py`'s `__path__` shim is the root cause, but it plausibly exists for the installed/E2E load path (`tests/test_e2e_local_install.py`, `tests/test_docker_script_install.py`, `tests/test_help_before_build.py`, all of which load `main.py` by path via `importlib.util.spec_from_file_location`), and removing it was out of scope here — the conftest guard is the durable mitigation regardless of what happens to the shim later. `main.py` itself is untouched by this fix (zero-diff against its pre-fix state); whether the shim is still load-bearing for that path is unverified and left for a follow-up rather than acted on here.
+- **A password that held a letter, an embedded line break, *and* hit one of `derive()`'s bail-out branches was still dropped as `unwritable_basewords`, even though 2.33.0 already fixed the break-in-baseword problem in general — see issue #295 for the residual cases this does not reach.** That fix routed the *letterless* fallback and the ordinary letters-only path through a break-lifting helper, but four other bail-out sites — an uppercase letter past addressable position 35 disqualifying every case encoding, and three places where the built-up ops exceeded `MAX_RULE_FUNCTIONS` — still returned the password verbatim as `(pw, ":")`, break and all, with nowhere for that break to go once it landed in the baseword. Every one of those bail-outs discards all ops built so far, so there was nothing to interleave the break-reinsertion with: the fallback only ever needed to compose with a literal baseword, which the existing helper (renamed `_literal_with_line_breaks`, its own two internal capacity limits unchanged) already computed correctly. A new `_literal_pair(pw)` is now the single home of "the literal fallback for *pw*", and all four bail-out sites, plus the letterless branch, call it instead of building `(pw, ":")` by hand.
+
+  **This narrows the residual gap; it does not close it.** A break past index 35, or one that would need more inserts than the `MAX_RULE_FUNCTIONS` cap allows, is a real limit of hashcat's rule language rather than a missing feature, and such a password still lands in `unwritable_basewords` — the `coverage.txt` explanation and the operator warning were reworded to name that narrower limit precisely instead of the old blanket "any bail-out" framing. One counting change falls out of this and is worth calling out on its own: a letterless password with an addressable break (e.g. `"12\n34"`, arriving as `$HEX[...]`) previously matched neither `no_letter_literals` nor `unrepresentable` and fell through both counters uncounted; it now lands correctly in `no_letter_literals`, so `coverage.txt`'s numbers will shift upward for any corpus containing `$HEX[...]`-wrapped break passwords, with no change to the underlying rule file.
+
+  No `Closes` line for #295 at release; it stays open, narrowed rather than closed.
+
+  Widening the fallback where it was too narrow also uncovered a coincidence in the classification logic that counts these fallbacks: for an all-lowercase-plus-break password (`"zorp\ntangle"`, say), `derive()`'s genuine successful derivation can come out byte-for-byte identical to `_literal_pair()`'s fallback answer, because both lift the same break to the same insert op at the same position. `_scan_corpus`'s fallback check now compares the full `(base, rule)` pair against `_literal_pair(pw)` rather than just `base == pw and rule == ":"` — the earlier check would have missed the CR/LF fallback pairs entirely, since lifting the break means `base` no longer equals `pw` — and `_derives_to_itself` now ignores break bytes when deciding whether a `(pw, ":")`-shaped result is a genuine derivation, so that coincidence is recognized rather than double-counted as `unrepresentable`. New tests in `tests/test_rulegen.py` cover an addressable-break case-ops bail-out and an addressable-break function-limit bail-out (both now written, not skipped), the coincidence case itself, and a letterless-plus-break password correctly landing in `no_letter_literals` rather than `unrepresentable`; two new bail-out passwords were added to `tests/test_rule_oracle.py`'s `_CASES` so hashcat itself, not just `apply_rule`, confirms the round-trip.
+- **Hardened `_corrupted_submodule_references()`'s canonical-name derivation for an arbitrarily-nested duplicate module.** It computed the expected real module name by taking only the last dotted segment of the duplicate's `__name__` (`"hate_crack." + value.__name__.rsplit(".", 1)[-1]`), which happens to work for a one-level submodule like `hate_crack.main.llm` (canonical: `hate_crack.llm`) but would truncate a hypothetical `hate_crack.main.progress.spinner` to `hate_crack.spinner` instead of the correct `hate_crack.progress.spinner`. Not reachable today — no `main.py` attribute is nested that deeply — but a latent correctness bug in the guard itself. It now strips the literal `hate_crack.main.` prefix instead of keying off the last segment, so the canonical name is derived correctly regardless of nesting depth. Covered by a new synthetic-module test in `tests/test_submodule_identity_guard.py`.
+
+## [2.33.0] - 2026-08-21
+
+### Added
+- **`CLAUDE.md` and `.claude/` are now published, and the publication boundary narrowed to match.** Both were gitignored and purged from branch history on 2026-07-25 as local-only development aids. That left the branching, release, tagging and config policies documented nowhere a contributor could read them: an outside contributor could see that `main` receives work only through a batch integration merge, but not why, nor that history must stay linear, nor that a `Closes #NNN` in a work-branch commit closes nothing. `.claude/` ships the tooling `CLAUDE.md` refers to, so it follows.
+
+  The boundary narrowed rather than disappeared. Still unpublished: `.claude/plans/`, `.claude/specs/`, `docs/plans/` and `docs/superpowers/`, which are local planning notes rather than part of the shipped project, and `.claude/settings.local.json`, which is per-developer permission state that Claude Code's own documentation calls personal and not checked in. So `.claude/` is published while two of its subdirectories are not — plans and specs are per-task scratch, written in the future tense and stale the moment the work lands, and a reader cannot tell a shipped design from an abandoned one. Four such files from April 2026 were dropped before publishing rather than shipped: one announced itself as superseded by another in the same set, and between them they referenced two test files that no longer exist. All four enforcement layers narrowed together — `.gitignore`, the `.github/scripts/check-publication-boundary.sh` pre-commit guard, `tests/test_commit_guards.py` and `tests/test_repo_hygiene.py` — and the guard tests now assert the narrowing in *both* directions, so a revert that re-forbids `CLAUDE.md` fails the suite instead of silently un-publishing it. The now-dead exemption for `tests/test_upgrade_real_git.py` was removed; `CLAUDE.md` gained one, because its Publication Boundary section is the prose definition of the list and has to name what it forbids.
+
+  Audited before publishing: no credentials, internal hostnames, RFC1918 addresses, client data, hashes or plaintexts in any published blob, and the one local home path was replaced with `<repo-root>`. Worth recording for the next time this comes up — **a gitignore plus a history rewrite does not unpublish anything on a repo that takes PRs.** GitHub's `refs/pull/N/head` is server-side and immutable, so the 2026-07-25 `filter-repo` rewrote branches and left PR heads untouched; these files stayed fetchable from PRs #78-#137 the whole time, which is only a non-event because the content was clean. The gate has to be "never commit it", not "purge it later".
+
+- **`tests/test_agent_instruction_integrity.py` pins the agent-instruction surface that publishing `.claude/` newly exposed.** A pull request can now propose changes to files a maintainer's coding agent reads as instructions and, for hooks, executes as code — without touching `hate_crack/` at all. Every hook command, hook script, subagent definition, skill, and shell script under `.claude/` is pinned to a literal approved set, so adding one fails the suite rather than arriving quietly. A `permissions` key in the shared `settings.json` is refused outright, since that would propose auto-approval rules for everyone who trusts the workspace rather than just its author, and any network verb in a `.claude/` script is refused because a hook that reaches the network can exfiltrate whatever the session has read. There is also a marker scan for crude instruction-override phrasing.
+
+  **The scan is a lint, not a boundary**, and the module docstring says so: no parser settles the intent of natural language. What the file buys is that a change to this surface cannot be silent — it has to be justified by a human editing the approved set on purpose. All six vectors were mutation-tested (added hook, shared `permissions` block, new hook script, injected text in `CLAUDE.md` and in a skill, network egress added to a hook), and each fails the suite.
+
+- **`test_no_tracked_file_references_unpublished_tooling` refuses a shipped file that points at unpublished tooling by name.** The existing guard matched literal paths, so it could not see a `superpowers:` skill reference — a namespace contains no path — and the skill library lives in the unpublished `docs/superpowers/`. Two `.claude/plans/` files carried a "REQUIRED SUB-SKILL: Use `superpowers:...`" directive and would have shipped it, sending contributors after tooling this repo does not contain; the directive was removed from both.
+
+- **`tests/test_doc_audit_parity.py` guards the documentation-audit heuristic, which was silently passing almost everything.** `.claude/audit-docs.sh` and `.claude/check-docs.sh` each carry their own copy of the two patterns deciding "code changed but docs did not", and both counted *any* changed `.md` as a documentation update — including `CHANGELOG.md`, which this repo touches on most commits. A changelog entry therefore satisfied the check: measured over the last 100 commits, the audit flagged 23, where excluding `CHANGELOG.md` flags 61. `tests/` is now excluded from counting as code as well, since a test-only commit changes no documented behaviour, bringing it to 52. The test runs every case against both scripts using real commits in throwaway repos rather than matching command strings, and is mutation-tested: reverting either exclusion in either script turns it red. This test could only live in `tests/` once `.claude/` became publishable.
+
+### Fixed
+- **A cracked password containing a literal line break no longer truncates a rule in the Spoonman Attack's output.** hashcat hands such a password over hex-wrapped, and `$HEX[...0a]` decodes to a plaintext ending in `\n`. `derive()` emits one append op per trailing non-letter, so the last op became `$` followed by that newline — and since `rulegen.generate()` writes each record as `value + "\n"` into a line-based file, the rule split across two lines: a fragment truncated mid-op, then a blank line. Found in the wild as `c$1$2$` sitting immediately above the *only* blank line in a 1,420,542-line `rules.full.rule`; hashcat parsed the file, rejected that one line, and said nothing, so the loss surfaced only as one rule of coverage that quietly did not exist.
+
+  Both existing safety nets were blind to it, which is the part worth recording. `validate_rule()` does reject `c$1$2$`, but `generate()` never calls it — the only call site is the LLM path in `main.py`, since the derive path is assumed correct by construction. And the reconstruction self-check passed *honestly*: `apply_rule("password", "c$1$2$\n")` really does rebuild `Password12\n`, so `selfcheck_failures` stayed empty. The corruption happens in the writer, downstream of every check that could have caught it — the same shape as the earlier edge-whitespace bug (2.31.0), one layer further down: there the password was altered before derivation, here a correct derivation is destroyed after it.
+
+  **The byte is spelled rather than dropped, so the password stays covered.** hashcat decodes `\xNN` in an op argument to a single byte before applying the rule, so `derive()` now emits `$\x0a` (and `\x0d` for CR) where it used to emit the raw byte — a rule a line-based file can hold and hashcat accepts. `apply_rule()`, `count_ops()` and `validate_rule()` decode the escape too, the last measuring arguments rather than counting characters so a four-character escape reads as one argument rather than four ops. Escaping is deliberately confined to those two bytes: a raw NUL and a raw `0x80`-`0xFF` argument both work fine in hashcat 7.1.2, and one real corpus produced 728 rules holding a high byte, so widening the escape would churn every one of those lines to no purpose. A trailing *space* is likewise untouched — it is a valid `$ ` append that 2.31.0 exists to preserve, and the two coexisted in the same real file, which is what made this hard to see.
+
+  A letterless password, normally its own baseword, gets the break lifted into an escaped insert op instead (`12\n34` → baseword `1234`, rule `i2\x0a`), because a wordlist line *is* the word and has no escape syntax to spell a break with. That leaves one residual case: a derivation that bails out to the literal pair — an uppercase letter past position 35, say — carries the break into the baseword, where nothing can encode it. Those are skipped and counted in a new `unwritable_basewords` statistic in `coverage.txt` and the returned dict, and reported to the operator, because a silent skip reads as full coverage. Note that screening the derive path through `validate_rule()` instead would have been wrong in the other direction, silently discarding those 728 high-byte rules hashcat accepts perfectly well.
+
+  Verified against hashcat 7.1.2 rather than against our own reference implementation, in a new `tests/test_rule_oracle.py` that hands hashcat each derived baseword-and-rule pair via `--stdout -r` and compares the candidate byte for byte — including a negative control proving the raw forms really are broken (an LF truncates, a raw CR is rejected outright), so the escape cannot quietly become unnecessary without a test saying so. On the six-password reproduction corpus: 6 rules written and 5 candidates before the fix, 6 and 6 now, with the newline password regenerated exactly and the `$ ` append still present.
+
+- **`.claude/verify-setup.sh` reported "Not in a git repository" in every worktree, and required a hook that no longer exists.** It tested for a `.git` *directory*, but a linked worktree's `.git` is a file containing a gitdir pointer — and this project's own policy requires all edits happen in a worktree, so the check failed exactly where it was meant to run. It now asks `git rev-parse` instead. It also listed `.git/hooks/post-commit` as required, which was removed along with the automatic audit, so a correctly configured checkout was reported as broken; it now reports on the `PostToolUse` trigger that actually fires.
+
+## [2.32.0] - 2026-08-21
+
+### Added
+- **The Hybrid attack now also sweeps the full `?a` charset at lengths 1-4 in both directions, and the whole attack is bounded by a configurable time budget (`hcatHybridMaxRuntime`, seconds, default 3600, 0 for no limit).** The existing passes only ever tried `?s?d`, so a decoration containing a letter was out of reach. `?a` is every printable character, making the new group a strict superset of the old one: 95**4 rather than 43**4 at the longest mask, about 1.2e15 candidates over rockyou.txt — roughly ten hours for NTLM on hardware doing 32 GH/s and hopeless on a slow hash. So the cheap `?s?d` group runs first and gets its chance to crack before 24x the work repeats it, and the attack is time-bounded rather than length-bounded, because the cost is the wordlist times the mask and a small targeted list finishes every pass outright.
+
+  **The budget is the attack's, not each pass's.** hashcat's `--runtime` bounds one invocation, so handing all sixteen passes the configured hour would have been a sixteen-hour "one hour" cap. They share one deadline and each receives what remains of it, and a pass the budget never reaches is reported — with the count and the setting to raise — rather than skipped in silence. Ordering within each charset group is by mask length across *all* wordlists rather than all lengths of one wordlist and then the next, because with a shared budget the length-4 pass over the first wordlist would otherwise consume the whole hour and leave a second wordlist without even its length-1 pass.
+
+  One more hashcat quirk shapes the skip condition: `--runtime 0` is rejected outright (`Invalid --runtime value specified`, exit 255), so a remaining budget that rounds down to zero skips the pass rather than passing the value through and failing it.
+
+  Two hashcat behaviours drove the shape of this and are worth recording, both verified against 7.1.2 and not documented anywhere obvious. The sweep is **one invocation per length rather than a single `--increment 1-4`**, even though the candidates are identical either way (`--increment` queues each length as its own job, visible as `Guess.Queue.Mod: 2/6`). First, `--runtime` is applied *per queued length*, so one `--increment` pass under a one-hour cap can spend four hours — the per-pass cap this entry exists to avoid, one level down. Second, a length cut short inside an `--increment` run still exits **1**, the code `_run_hcat_cmd_uncovered` reads as "keyspace exhausted", so the coverage store would have recorded ground that was never enumerated. A standalone mask cut short by `--runtime` exits **4** instead, which is not recorded — so each length that genuinely completes is banked and one that runs out of budget is retried next time.
+
+- **The Hybrid attack (menu 7) now tries a one-character mask, and reports what it covers to the coverage store (#273).** Its mask matrix started at two positions, so a single appended or prepended character from `?s?d` — the cheapest pass available and the decoration this attack exists to catch — was never generated at all. Lengths now run 1 through 4 in each direction, cheapest first, giving eight passes per wordlist instead of six. Each pass also declares a `CoverageSpec` now, where before it passed none and so was only logged as history and never filtered; a repeat hybrid against the same hash file offers to skip what already ran. Two details make that spec sound: the mask is keyed in hcmask inline form (`?s?d,?1?1`) rather than as the bare `?1?1` the command line carries, because `?1` names nothing without its `-1` definition and would otherwise collide with any attack that spelled `-1` differently; and the attack mode goes in the variant, because appending a mask to a word and prepending it enumerate disjoint candidate sets. hashcat is still handed `-1 ?s?d` plus the bare mask — comma-separated charsets are valid in an hcmask file but not on argv — so the inline form is only ever a key.
+
+### Changed
+- **`hate_crack/config.json.example` is a real file again rather than a symlink to the root copy, and the parity guard now compares bytes on every run.** The symlink came from #151, which single-sourced the example after the two copies had drifted badly (#150: ten keys missing from the packaged copy, four dead `passgpt*` keys still shipped, `hcatPath` disagreeing). One inode cannot drift, but it does not survive every clone: git only creates a symlink where the checkout supports one, so on Windows without developer mode or `core.symlinks` the working tree gets a text file containing the target path — and the packaged example then parses as JSON garbage for exactly the users least equipped to diagnose it. The parity test used to short-circuit when both paths resolved to the same inode, which in the source tree made it a no-op; it now always runs and compares bytes, with a failure message naming the fix, and a companion test asserts the packaged copy is a regular file so the symlink cannot come back unnoticed. Verified that a built wheel and sdist both ship the packaged copy byte-identical to the root one.
+- **hashcat session names now name the attack as well as the hash file, so each attack keeps its own `.restore`, `.log` and `.pid`.** `generate_session_id()` was built from the hash file alone, and hashcat derives its entire per-session file set from that name — `{session}.restore`, `.log`, `.pid` and `.outfiles` under its session directory. Every attack against one hash file therefore shared that set: each attack silently overwrote the previous one's restore point, appended to its log, and two hate_crack instances working the same file trampled each other. Names are now `{hashfile}_{attack}` using the same label the attack already passes to notifications (`users_hashes_Brute_Force`), so a session is self-describing in hashcat's status output, and the three subsystems — session, notification, coverage-store attack column — read alike. Two attacks that genuinely run several distinct hashcat passes get one session each: Hybrid by mode and mask length (`_Hybrid_a6_3`), Corporate Masks by mask length, Thorough Combinator by which side its rule applies to, LM-to-NT by phase. Runs of illegal characters collapse to a single underscore, so `"Corporate Masks (len 9)"` reads as `Corporate_Masks_len_9` rather than a row of underscores, and a name that sanitizes down to nothing falls back to `hate_crack` because hashcat rejects an empty `--session`. Verified against hashcat 7.1.2: the four session files appear under the generated name. Note that an in-flight `.restore` from a previous version will not be found under the new name.
+
+  The function also takes the hash file as an argument now instead of reading the module global. The two are not always the same file — `hcatLMtoNT` drives hashcat against `{file}.lm` and then `{file}.nt`, and every attack function receives its target as a parameter that shadows the global name locally — so the global read could name a session after a file the command was not attacking. A parsed static guard over all 36 call sites (`tests/test_main_utils.py::TestEveryCallSiteNamesItsAttack`) fails if a new attack omits the hash file or the label, since the symptom otherwise only shows up in hashcat's session directory.
+
+- **Smart Mask now collapses its patterns into hybrid attacks instead of emitting one `-a 3` mask line each, which is what stops hashcat warning that the keyspace is too small to fill the device.** hashcat treats every line of an `.hcmask` file as an independent attack: it autotunes per line and applies the base-word check per line. Every Smart Mask line was a fixed literal stem plus two to four varying characters, so each one was 10^2-10^4 candidates against a device asking for millions of base words, and hashcat said so on stderr every time — on a representative corpus, 314 of 314 lines warned. Collapsing lines could not fix that, because *no* two lines were collapsible: a mask line's literal **is** its identity, so lines with different stems have disjoint candidate sets (measured: zero exact duplicates and zero subsumptions among the 314). Nor could a bigger mask fix it — a single ten-million-candidate `-a 3` mask still warns.
+
+  What does fix it is moving the literal out of the mask. A pattern with a contiguous fixed run at either end becomes a hybrid attack — `-a 6` when the mask trails the stem, `-a 7` when it leads — with the stem a line in a wordlist and the mask hashcat's per-word amplifier. Patterns are then grouped by `(mode, custom charsets, mask)`, so every pattern that varies the same way shares one invocation and one wordlist. On the same corpus that is 314 mask lines down to **8 hybrid runs, none of which warns**, with the total candidate count unchanged (1.96M) — this buys parallelism, not extra work. Verified against hashcat 7.1.2 on an M3 Max: `Guess.Base: File (...words), Left Side` / `Guess.Mod: Mask (?d?d?d?d), Right Side`, zero "too small" warnings across every group, `-a 7` included.
+
+  Only *one* end has to be fixed, because a hybrid mask is a full mask and may carry literal characters of its own: `orangecrate_412@` splits into the stem `orangecrate_` and the mask `?d?d?d@`. Getting that wrong is what makes the `-a 3` fallback look far more common than it is — it is reached only when *both* ends vary, leaving no fixed run to seed a wordlist with. Those residual patterns, and only those, have their charsets widened (see below), since widening is what is left for a pattern that could not be collapsed.
+- **Smart Mask infers a run's alphabet from two observed characters instead of half the alphabet, and widens what it cannot collapse.** `_infer_charset` required an observed set to cover 50% of a known alphabet before generalizing to it, which was unreachable for the cluster sizes this attack sees: a position shows at most one distinct character per cluster member, so at the default cluster size of 3 a digit run needed 5 distinct digits from at most 3 samples, and a letter run needed 13. A three-member cluster of year suffixes therefore got the literal charset `0234` — a `?1` slot and 256 candidates where `?d?d?d?d` is the same slot-free 10,000. The single global fraction is replaced by a per-alphabet minimum distinct-character count, because the cost of guessing wrong is not uniform: digits and the shift-row symbols need 2 (both cheap, and `?d` is a builtin that costs no slot), letters keep the old effective 13/26 (26 or 52 characters per position compounds fast enough to push a template past the keyspace guardrail and get it dropped entirely). Every minimum is at least 2, which is what keeps a run that varies only in *length* — one distinct character — rendering as a bare literal rather than being widened to a whole alphabet the cluster never evidenced. Note that letter runs cannot currently reach this function at all, since `_seed_key` groups by the contents of every letter run and `_build_template` therefore always classifies those positions as fixed; the two letter rows are insurance, not live behaviour.
+
+  Separately, a pattern that reached the `-a 3` fallback now has its charsets widened, tried widest-first: `?a` for every run that varies in content, else the tightest builtin containing what was observed, else left as inferred. The guardrail always wins — if neither rung fits under the per-pattern candidate limit the pattern is left exactly as it was, so widening can never turn a pattern that would have run into one that gets skipped. A knock-on effect of the inference change is that `SmartMaskSlotLimit` is now much harder to hit, since same-class character pairs resolve to a builtin instead of each taking a slot; it takes nine runs over charsets that are subsets of no known alphabet and of nothing narrower than `?a`.
+- **Smart Mask now writes hashcat's own charset tokens instead of burning a `?1`-`?8` slot on a charset hashcat already has a name for.** Every varying digit run emitted a `0123456789` custom-charset field and `?1?1?1?1`, where `?d?d?d?d` enumerates exactly the same candidates in a shorter line and no slot at all. `_assign_mask_tokens` (formerly `_assign_charset_slots`) now resolves each position's charset in three steps: a set-equality match against hashcat's eight builtins (`?l ?u ?d ?h ?H ?s ?a ?b`) becomes that token; a single-character charset — which is what a run that varies only in *length* produces — becomes the escaped literal itself, since `?1` over a one-character set is that character; and only what is left takes a shared `?N` slot. The match is on the character set rather than the string because `_infer_charset` returns observed characters sorted, which is not the order hashcat writes them in. On a representative cluster set the emitted file shrank from 225 to 141 bytes and no line needed more than one custom slot, where before two was common.
+
+  The point is not the file size. Builtins and inlined literals no longer count against the eight-slot ceiling, so a template that mixes eight genuinely distinct charsets with any number of digit, letter or fixed-symbol runs now builds where the digit runs alone could previously exhaust the slots and get the whole cluster dropped by `SmartMaskSlotLimit`. That message now says the count is of charsets still needing a slot *after* builtins and single-character runs are inlined, so it cannot be misread as counting varying runs. hashcat's builtin table is duplicated locally rather than imported from HashcatRosetta, so mask building does not depend on the optional import; a drift-guard test pins the local copy to Rosetta's `BUILTIN_CHARSETS` exactly.
+
+  Deduplicating the emitted lines was considered and deliberately not done: templates are grouped by their letter-run contents, so two templates always differ in their fixed literals and the lines they emit are duplicate-free by construction. A fuzz over 300 randomized corpora produced no duplicate line, so a dedup pass would be dead code.
+- **The HashcatRosetta submodule moves to `a5e1017`, which puts hcmask field escaping in one place.** That release makes `format_hcmask_line` escape `\` as well as `,`, and fixes its parser to follow hashcat's actual escape state machine — a backslash escapes whatever follows it and is dropped, tracked so an escaped backslash cannot escape the next character. Two things follow here. The backslash handling added to `_escape_mask_literal` in the fix above is now redundant and has been removed, leaving that function owning only `?`. And `canonical_mask_entry()`/`--verify-masks`-style parsing no longer misreads lines like `a\\,?1?1`, which the old vendored parser rejected outright as invalid despite hashcat accepting them. The assembled `.hcmask` lines Smart Mask emits are byte-identical before and after this move — verified case by case, and against `hashcat --stdout -a 3` — so this is a relocation of responsibility, not a behaviour change.
+- **Mask coverage is now keyed on the candidate set a mask enumerates, not on its raw text.** Two `.hcmask` lines with different text can try exactly the same candidates, and the store was recording the second one as untried. Only the custom charset fields cause this, in three ways: a charset can be spelled as a token or spelled out (`?d` and `0123456789` expand identically), hashcat deduplicates it (`aa` *is* the charset `a`), and its character order changes the enumeration order but not the set. `canonical_mask_entry()` resolves all three through HashcatRosetta's own charset expansion, and `entry_key()` applies it for `kind="mask"` only — a rule has no equivalent normalization. Whitespace is deliberately *not* normalized: a mask is whitespace-significant in the same way a rule is, so the trailing space in `?d?d ` is a literal position and genuinely enumerates different candidates. A mask with no custom charsets is returned verbatim, which is what keeps every previously-recorded plain-mask key bit-identical; the keys that do change are custom-charset masks, which will re-run once each. An unparseable mask keys on its raw text rather than raising — that is hashcat's error to report, and the key still has to be stable. The whole path no-ops when the HashcatRosetta submodule is unavailable. Note the import needs its own `sys.path` setup rather than relying on `main.py`'s, because `main.py` imports `attack_coverage` *before* inserting `ROSETTA_DIR` — the same reason `hate_crack.llm` carries its own guard.
+
+### Fixed
+- **A directory can now be given as the Hybrid attack's wordlist.** Both layers required `os.path.isfile`, so a wordlist collection was rejected as not-found at the prompt (`attacks.hybrid_crack`) and dropped with `[!] Wordlist not found` when it came from `config.json`'s `hcatHybridlist` (`hcatHybrid`) — even though hashcat itself accepts a directory in the dictionary position of `-a 6`/`-a 7`, verified against 7.1.2. `hcatHybrid` now expands a directory into the wordlists directly inside it rather than handing the directory to hashcat: the passes are the same either way, but expansion gives the coverage store one key per wordlist file, so a list added to that directory later is new ground instead of something the directory's single key already claimed. The expansion is one level deep, which is what hashcat walks — it ignores subdirectories — and it drops dot-files and `.7z`/`.torrent`/`.out`, which hashcat would not: a Weakpass download leaves archives in the wordlists directory. A glob is routed through the same expansion, because a pattern matches directories as readily as files and a directory that stayed one would take the coverage path that cannot fingerprint it (`wordlist_fingerprint` returns `None` for a directory, which makes the whole plan inert, so those passes would be recorded nowhere and never skipped on a repeat). A directory holding only subdirectories now says that rather than reporting itself as empty, the existing order-preserving dedupe covers a directory named alongside a file inside it, and an expansion that multiplies one entry into many prints the resulting wordlist count and the pass total it implies — counted off the pass generator rather than multiplied out, so it cannot drift from the matrix actually run. `_resolve_wordlist_path` learned to resolve a directory too, in a second pass after the file search, so a real file anywhere in the search order still outranks a same-named directory earlier in it.
+- **A Smart Mask pattern whose `.hcmask` line began with `#` was silently never tried.** hashcat reads such a line as a comment, and the loss leaves no trace: every other line in the file still runs and the exit status is 0. Two routes reached it — a custom-charset field, because `_infer_charset` returns characters in sorted order and `#` (0x23) sorts ahead of everything except `!` and `"`, so any symbol charset containing `#` but neither of those led the line; and a mask whose first fixed literal simply begins with `#`. The second is worse than a comment: with no charset field present hashcat rejects the whole file with "Invalid mask." and the attack tries nothing at all. Assembled lines now get a leading `\` when they start with `#`, which hashcat drops before taking the `#` literally. It can only ever apply to a line already starting with `#`, so it cannot collide with the escaped `\\` that `rosetta_format_hcmask_line` emits for a literal backslash. A 60-template fuzz against `hashcat --stdout` went from 13 rejected mask files to zero.
+- **A `?` inside a Smart Mask custom-charset *definition* is now escaped.** `mp_expand` tokenizes the definition as well as the mask, so a bare `?` in one is a dangling token and hashcat rejects it ("Syntax error in mask"). Reachable through `_infer_charset`'s fallback, since `?` belongs to `?s` but not to the shift-row alphabet. In an `.hcmask` file this cost one line; on argv, where the collapsed hybrid groups pass their charsets via `-1`, hashcat exits 255 having tried nothing — which would now lose every stem in the group. Escaped in `_assign_mask_tokens` so both paths get it.
+- **Smart Mask charset widening no longer drops observed non-printable bytes.** `?a` covers printable ASCII only, so substituting it for a run that observed a byte outside that range — exactly what the latin-1 handling and `convert_hex` exist for — removed a character the cluster demonstrably contained, turning a widening into a silent narrowing. Such runs are now left to the containment rung, whose search reaches `?b`.
+- **One ctrl-C now abandons the Hybrid attack instead of only the pass that was running.** `hcatHybrid` called `_run_hcat_cmd` without `reraise_interrupt=True` and had no handler of its own, so the funnel swallowed the interrupt and the loop immediately launched the next pass — eight of them per wordlist, and the four-position mask over a large dictionary is exactly the pass an operator wants to bail out of. Escaping the attack took one interrupt per remaining pass. It now uses the same `reraise_interrupt=True` inside an outer `except KeyboardInterrupt` that every other looping attack in the module already used, and the cracked-count readback happens after that handler so a partial run still reports what it found.
+- **A Hybrid attack that resolves no wordlist no longer leaves the previous run's cracked count standing.** `hcatHybridCount` was only assigned inside the wordlist loop, so the "no valid wordlists" early return left the global at whatever an earlier hybrid had set — and `extensive_crack` hands that straight to `hcatRecycle`, which would then recycle a count borrowed from a different attack. It is reset to 0 on entry. The assignment also moved out of the loop, where it read as per-wordlist but was computing a cumulative total.
+- **Hybrid wordlist globs are now expanded instead of being handed to hashcat verbatim.** `hcatHybrid` accepted any path containing `*?[]` as valid without checking it matched anything, but nothing ever expanded it: the command goes to `subprocess.Popen` as a list with no shell, so the literal pattern reached hashcat and failed as a missing file. Patterns are expanded with `glob` and a pattern matching nothing now says so. The two layers also disagreed — `attacks.hybrid_crack` required `os.path.isfile`, so a glob typed at the wordlist prompt was rejected as not-found while a glob in `config.json`'s `hcatHybridlist` sailed through; both paths now accept one. Duplicate wordlists are deduped, since naming the same list twice was eight wasted passes.
+- **Answering "no" to the Hybrid attack's default-wordlist prompt no longer uses the default anyway.** The check was `!= "n"`, so anything but that single letter counted as yes. It now matches the `not in ("n", "no")` form used elsewhere in the module.
+- **A backslash in a Smart Mask literal no longer silently deletes the character after it.** `_escape_mask_literal` doubled `?` but left `\` alone, and a backslash is hashcat's hcmask *field* escape — consumed by `mask_ctx_parse_maskfile` (`src/mpsp.c`) before the mask is ever tokenized, which drops the backslash and takes the next character literally. So a cluster built from `pass\word` emitted `0123456789,pass\word?1?1` and hashcat enumerated `passwordNN`: a mask derived from a real cracked plaintext that could never match that plaintext, with nothing in the output to say so. A trailing backslash vanished outright. Confirmed and fixed against `hashcat --stdout -a 3`, which now yields `pass\word0`…`pass\word9` for the same cluster. This is the same silent-corruption class as the earlier `$HEX[...]`/latin-1 fix (#288), one layer up: there the bytes were re-encoded, here a byte is eaten by an escape nobody accounted for.
+
+  Commas stay unescaped here on purpose, and as of the submodule bump below, so do backslashes. Both are hcmask *field* escapes and `format_hcmask_line` handles them while assembling the line; escaping in both places would emit `\,` as a literal backslash plus a real field break, and a doubled backslash for `\`. `_escape_mask_literal` now owns only `?`, which `mp_expand` reads after the field escapes are already gone. Two tests pin the fully assembled lines rather than this function's output alone, so a submodule move in either direction fails loudly instead of silently corrupting masks — which is precisely what caught the transition: with the new submodule and the local escaping still in place, they failed on a doubled backslash.
+- **Smart Mask now shares one `?N` slot between variable runs that resolved to the same charset, so hashcat's eight-slot ceiling stops acting as a ceiling on varying runs (#273).** `_build_hcmask_lines` allocated a slot per variable position — `variable_positions.index(position) + 1` — regardless of whether those positions had anything to distinguish them. A template varying nine digit runs therefore emitted `?1`…`?9` with nine byte-identical `0123456789` definitions, and Rosetta's `parse_hcmask_line` rejected it at the `?1`-`?8` limit hashcat itself imposes. The whole cluster was then dropped by the generic `except RosettaMaskError` path, reported only as "skipping an unbuildable template" — no count, no cause, nothing an operator could act on. Slots are now assigned per distinct charset, which is exactly equivalent (`?1` used at several positions enumerates what several identically-defined slots would) and costs nothing: that nine-run template now builds as `0123456789,a?1b?1c?1…` against one slot.
+
+  A template that needs more than eight *genuinely distinct* charsets still cannot be expressed, so that case is now caught up front by `_assign_charset_slots` raising `SmartMaskSlotLimit` rather than being discovered by the mask parser. The message names the template, its member count, how many charsets it needed and across how many varying runs, so it reads as "this cluster is too internally varied to express" rather than as a malfunction. `_build_hcmask_lines` raises the same error as a backstop for direct callers.
+
+- **Coverage no longer conflates rules that differ only in non-UTF-8 bytes, and the overlap prompt now names the wordlists it measured against (#273).** `entry_key()` encoded its payload with `errors="replace"`, which maps every undecodable byte to the same U+FFFD — so two rules that `read_entries()` had correctly kept apart as surrogates, `$\xc3$\xa1` and `$\xc3$\xa9` say, hashed to one key, and running either marked the other covered. That is the unsafe direction: coverage is supposed to fail toward running too much, never toward silently skipping untried candidates. Bandrel's `Spoonmanv1.full` rule file alone collapsed 154 of its 1,420,541 rules that way. The encode is now `surrogatepass`, which is injective over every string `read_entries()` can produce and — unlike `surrogateescape` — cannot raise on a surrogate outside `\udc80`-`\udcff`, since an encode error here would take down an attack the store exists only to speed up. No migration is needed: keys for pure-UTF-8 entries are byte-identical, and the previously-collapsed ones simply read as uncovered and run again.
+
+  The prompt wording changes for a related reason. Rules and masks are tracked per *line*, so a rule file an operator has never selected can legitimately come back 100% covered when a larger file already ran every line in it — `Spoonmanv1.top50` is wholly contained in `Spoonmanv1.full`. Reporting that as "already been run against this hash file" reads as a claim about the file just picked and looks like a bug; it now names the wordlists the overlap was measured against, and a full-coverage report adds one line explaining that per-line tracking is why a first-time file can be fully covered.
+
+- **Documented that the `parse_hcmask_line` call in `hcatSmartMask` is the validation step, not a redundant check on our own output.** HashcatRosetta's `format_hcmask_line` is a pure string builder that does not validate at all — it returns a line with a bad token or an unescaped literal as happily as a good one — so the parse is the only thing standing between a malformed template and a `.hcmask` that fails at hashcat run time. Now that `_assign_charset_slots` catches the slot-count case up front, this parse is easy to mistake for duplicated effort; it still covers the rest of the grammar.
+
+## [2.31.0] - 2026-08-20
+
+### Added
+- **hate_crack now tracks which rules, masks and wordlists have already been run against a given hash file, and offers to skip the overlap on a later attack (#273).** Across a long engagement the same hash file is attacked over many sessions with a rotating set of wordlists, rule files and mask lists, and there was no way to answer "have I already tried this?" — so operators re-ran covered ground without knowing, which the shared-rule problem makes near-certain: a rule in `best64.rule` also lives in half the custom rule files that get run later. Coverage is therefore recorded **per entry rather than per file** — individual rule lines and individual `.hcmask` lines, each paired with the wordlist it ran against — because a file-level record cannot see that overlap at all. The wordlist has to be part of the key rather than tracked separately: the same rules over a different corpus try entirely different candidates, so a rule counts as covered only for the list it was actually tried with, and an entry already covered for one wordlist but not another still runs. The hash file is identified by a sha256 of its contents so coverage survives a rename or a move between sessions (hate_crack does not use hashcat's `--left`, so that content is stable for the life of an engagement), and wordlists are identified the same way with the digest memoized against `(size, mtime)` — a content hash was chosen over a cheap path+size+mtime fingerprint so a moved corpus keeps its history, and the memo is what keeps that affordable, since rehashing a 31 GB corpus on every attack would cost minutes of I/O per run. The prompt fires **only when there is something to skip**, so a fresh engagement is never interrupted by a question; answering yes writes a temp rule/mask file holding just the untried entries and rewrites the `-r`/mask argument, or skips the hashcat launch outright when every entry is a repeat. Wired into `hcatDictionary`, `hcatQuickDictionary`, `hcatTopMask`, `hcatAdHocMask`, `hcatCorporateMasks` and `hcatGoodMeasure` via a new `coverage=` argument on `_run_hcat_cmd`, which each attack fills in explicitly — the assembled `cmd` list cannot say which positional argument is a wordlist and which is a mask, so parsing it was not an option. Controlled by `coverage_enabled` in `config.json` (default `true`) with a `--coverage`/`--no-coverage` per-run override.
+
+  Four decisions worth knowing before touching this. **Recording happens only when hashcat exhausts the keyspace** — exit 1, not interrupted — so a ctrl-C or an error never leaves the store claiming ground that was not covered. Exit 0 deliberately does *not* count: it means every hash cracked, which hashcat reports without finishing the keyspace, and in the "All hashes found as potfile entries" case without enumerating anything at all. That case is live here, because the potfile matches on the hash string rather than the mode, so one stray cross-mode entry could otherwise mark a whole rule file covered after a no-op run. **`--loopback` is recorded but never filtered.** It recycles freshly cracked plaintexts as *extra* candidates, so the run tries everything declared plus whatever those reach -- which makes the two directions asymmetric rather than simply unsafe. Recording is sound, so a later ordinary run of the same wordlist and rules is correctly skipped as a repeat; filtering is not, because a second loopback run has more cracks to recycle and reaches ground the first could not. Expressed as `CoverageSpec.record_only`. **Chained rule files are tracked as one all-or-nothing unit**, not per entry: `-r a -r b` makes hashcat apply the *cartesian product* of the two files, so dropping an individual line from either would silently remove every combination it participated in; `hcatGoodMeasure` is the affected caller. **Dynamic candidate generators are never filtered** — PRINCE, PCFG, OMEN, Markov and the LLM modes have no fixed set to diff, and are only logged as having run. And **every failure to establish identity disables filtering rather than guessing**: an unreadable hash file, a wordlist glob that matched nothing, an empty rule file. That bias is the whole safety argument — an unfiltered run costs time, a wrongly filtered one silently skips untried candidates.
+
+  Storage is SQLite (`~/.hate_crack/coverage/attack_coverage.sqlite3`, stdlib `sqlite3`, no new dependency) rather than the append-only sha256 key file `hate_crack/hashview_cache.py` uses, because the two are different scale classes: that cache is bounded by the size of a hash list, in the thousands, while this one is bounded by rules times wordlists. `d3ad0ne.rule` plus `T0XlC.rule` is 38,194 rules and `hcatDictionary` runs the pair once per wordlist, so one Dictionary attack over five wordlists produces ~191,000 keys. Measured at that scale, an append-only file reaches 124 MB after ten identical runs — it grows on every repeat even when coverage does not change — where a primary key holds flat at 27.5 MB. Lookup speed was never the deciding factor and the benchmarks said so: 38k-key membership runs in ~57 ms and every schema variant tried landed within 10 ms of that. What the primary key buys is `INSERT OR IGNORE` deduplication, plus somewhere to put the run history. Two consequences of measuring rather than assuming: the `covered` table is normalized to `(key, run_id)` because the denormalized form was storing `"Dictionary"` and a timestamp 191,000 times (39.6 MB against 27.5 MB), and it is `WITHOUT ROWID` *only because* that made it narrow — a first attempt applied `WITHOUT ROWID` to the wide table and measured slower to insert with no size win. Membership binds the whole key set as one JSON parameter via `json_each`, which is a single static statement rather than an interpolated `IN (?,?,?…)` chunked under SQLite's 999-parameter limit; a temp-table join is kept as a fallback for a SQLite built without JSON1, and it is slower on purpose (the planner joins from `covered`, so it scales with the store rather than the probe).
+
+- **Attack coverage is now inspectable and resettable, and a scripted run can tell that it was skipped (#273).** Both were gaps left by the original coverage work: `forget_target()` and the run history existed and were tested but had no way in, so resetting meant deleting the SQLite file — which resets *every* target, not the one engagement you wanted to redo. There is now a **main-menu option 85, Attack Coverage** (85 rather than the free-looking 83, because 83 and 84 are retired notification toggles and reusing one would hand an operator's muscle memory a different feature) alongside a `coverage` subcommand tree following the existing `hashview` pattern: `coverage status|history|forget --hashfile X`, with `forget` confirming unless given `--yes`. Both surfaces render through the same `_coverage_report()`/`_coverage_history_report()`/`_coverage_forget()` helpers so they cannot drift. The hash file is identified by content, so these work after it has been moved or renamed. `status` is backed by a new `CoverageStore.summary()` whose per-attack rows carry entries *and* runs separately — an attack with runs but no entries is one that was logged rather than filtered, which is how a dynamic generator and a no-op repeat both show up.
+- **`--exit-code-on-skip` makes a fully-skipped scripted attack exit 3.** Previously a cron or harness caller could not distinguish "the attack ran" from "coverage had already seen all of it and nothing launched" — both were exit 0. It is behind a flag rather than unconditional precisely because `coverage_enabled` defaults to `true`: returning 3 by default would start failing existing `set -e` harnesses the first time an attack repeated, without them having changed anything. Exit 3 means *nothing* was launched; a partially filtered pass still exits 0, since the attack did do work. Implemented as two per-invocation counters in `main.py` (`reset_run_counters()`/`run_counters()`) that `_run_hcat_cmd` increments, read by `run_noninteractive` after dispatch. The counter calls are optional on the duck-typed `ctx`, so existing callers that pass a stand-in are unaffected.
+
+### Changed
+- **Dependency bumps: `atomic-agents>=2.10.0`, `setuptools>=84.0.0` (build), `ruff==0.16.3` and `ty==0.0.72` (dev), and `astral-sh/setup-uv` v9.0.0 -> v10.0.1 across all four workflow pins (#280, #281, #282, #284, #285).** No source change was needed for any of them: ruff 0.16.3 reports no new findings over the 165 formatted files, and ty 0.0.72 reports one diagnostic *fewer* than 0.0.69 (51 warnings, zero errors, an `invalid-assignment` that upstream now resolves), so the gate's scope and expectations are unchanged. The `setup-uv` bump moves the pinned commit to `20cfd1bf`, verified against the upstream `v10.0.1` tag rather than taken from the bot's comment.
+- **The proposed `openai>=3.1.0` bump (#283) was declined rather than merged, because it does not resolve.** `instructor` — which `hate_crack/llm.py` imports directly and which the `openai` pin exists to pair with — caps `openai>=2.0.0,<3.0.0` in every release published to date, up to and including 1.15.4, so raising the floor to 3.1.0 makes the dependency set unsatisfiable and `uv lock` fails outright. This is a bot bumping one half of a coupled pair; the bump becomes available once instructor widens its own range, and there is nothing to do here until it does. The floor stays at `>=2.53.0`, which currently resolves to openai 2.54.0.
+
+### Fixed
+- **`$HEX[...]` plaintexts no longer become unmatchable bytes in a generated `.hcmask` (#288).** `convert_hex()` decoded them as iso-8859-9 rather than the byte-preserving latin-1 convention `hate_crack.plaintext` already uses, and `hcatSmartMask`/`hcatRosettaMask` then wrote the resulting literals into their `.hcmask` files as UTF-8. Together those re-encoded any byte >= 0x80 into a different, multi-byte sequence, so a Smart Mask cluster built from a password hashcat had to `$HEX[]`-wrap generated a mask that could never match the real candidate bytes.
+
+## [2.30.0] - 2026-08-20
+
+### Changed
+- **The Spoonman Attack (menu 22) now reports "literal fallbacks" split into the two opposite things it was conflating.** A single `literal_fallbacks` count covered both a password with no ASCII letter anywhere — which is its own baseword under a `:` rule, the correct answer and a perfectly good dictionary entry — and a password that holds letters but could not be encoded within hashcat's limits, which is a real loss of expressiveness. Only the second is a defect, so an operator reading the combined number as "expressiveness lost" was reading something else: on a 360,000-password sample of a real corpus, **100%** of the fallbacks were the letterless kind and **zero** hit a limit. `coverage.txt` and `generate()`'s returned dict now carry `no_letter_literals` and `unrepresentable` separately, each with a one-line explanation in the report that says plainly which one is not a defect, and the console summary breaks the total down the same way. `literal_fallbacks` stays in the returned dict as the sum of the two, so nothing downstream breaks. The module docstring no longer leads with the two hashcat limits (a `T`/`i`/`o` position past index 35, and more than 31 rule functions) as the primary cause of a fallback; they are real but were measured never to fire on the realistic 6-12 character passwords a corpus is made of.
+- **The Spoonman Attack (menu 22) now keeps leet-substituted letters in the baseword instead of deleting them.** 18.9% of the passwords in a 360,000-password sample of a real corpus carry an interior leet character, and every one of them used to lose the substituted letter: a synthetic `Sw1ftK1ng` derived to the baseword `swftkng` plus two `i` inserts, a baseword that rebuilds exactly one password and combines productively with nothing. It now derives to `swiftking` with the same number of rule functions (`cT5o21o61`), using the `o{pos}{char}` overwrite op — a real word that combines with every other rule in the file. That 18.9% is the *opportunity*, not the yield. Reversing a leet substitution is ambiguous — `1` is `i` or `l`, `$` is `s` — and applying a static reverse-leet map unconditionally measurably *hurt*, producing 4.2% more unique basewords in the audit because wrong guesses fragment the list. Restoration is therefore gated on corpus attestation, and the gate rejects most of the opportunity on purpose: over that same 360,000-password sample the measured restoration rate was **659 basewords, 0.18%**. That is a deliberate precision-over-recall trade rather than an underperformance — a fragmented baseword list is worse than an unrestored one — so read this as a correctness fix to the basewords it does restore, not as a reach improvement. The change that addresses reach is the baseword-source menu under Added below, because the attack is baseword-limited rather than rule-limited (47-57% of misses lack a baseword, only 18-21% lack a rule). Mechanically: `rulegen.generate()` reads the corpus twice, pass 1 building the letters-only baseword counts and pass 2 re-deriving each password against them, restoring a letter only when at least two other passwords already attested the resulting baseword (most-attested candidate wins; ties go to the more-restored, then the lexicographically smaller form, so output stays byte-identical run to run). Nothing attested means the previous letters-only derivation, unchanged. `coverage.txt` and the returned dict gained `leet_restored`, and the report states that a second pass was made so the doubled read time is not a mystery. `generate(leet_restore=False)` reads the corpus once and reproduces the old output exactly.
+- **The Spoonman Attack (menu 22) generates more compact rules via cost-optimized case encoding.** The baseword derivation previously emitted one `T{p}` (toggle) per uppercase letter, regardless of context, so a mostly-uppercase password like `SUPERWORd` generated an 8-function rule (`T0T1T2T3T4T5T6T7`) where the new encoding emits `uT8` (uppercase all, then toggle position 8) — 2 functions for the same password. The derivation now compares four candidate case encodings against the all-lowercase baseword — none (cost 0), direct (one toggle per uppercase), u+invert (uppercase all, then toggle each lowercase), and c+fix (capitalize, then toggle uppercase at positions > 0 and position 0 if it lands lowercase) — and picks the minimum cost, breaking ties in order: none, c, u, direct. Positions beyond 35 (unaddressable in hashcat's 36-character position alphabet) disqualify only that candidate, not the whole password. On a 360,000-password sample of a real corpus, 7,292 passwords were re-encoded to cheaper rules, saving 14,784 rule functions across the full rule file. The point is not file size: a rule expressed in fewer functions is the *same* rule for more passwords, so it merges with more of them, ranks higher on frequency, and therefore survives into the capped `rules.topN.rule` tiers — which is what decides whether it is in the rule file an operator actually runs.
+
+### Fixed
+- **The wordlist directories the shipped config points at are now gitignored, so self-upgrade is not blocked by an operator's own corpora.** `config.json.example` ships `hcatWordlists` as `"./wordlists"` and `hcatOptimizedWordlists` as `"./optimized_wordlists"` — both relative, so on a checkout that kept the defaults the collections land inside the repo, exactly the situation the `hashcat_debug/` rule above already covers. Neither path was ignored, and `_run_upgrade()` refuses to upgrade when `git status --porcelain` reports anything, so the untracked directory made the tool's own documented upgrade path unreachable: the menu printed `Cannot auto-upgrade: uncommitted changes on 'main'` with nothing actually modified. The workaround it suggests does not help either, because `git checkout -B nightly-dev origin/nightly-dev` leaves the same untracked directory in place and the next upgrade fails identically. Two further reasons these belong in `.gitignore` rather than in each operator's `.git/info/exclude`: a real collection runs to tens of gigabytes, so a stray `git add -A` is expensive rather than merely wrong, and a cracked-password corpus is client data, which is the one category that must never reach a public remote — the same argument the `*.out`/`*.passwords` block above is written for. A local exclude does not clone, so every operator hit this independently. No tracked file matches either pattern; `.env` and `hashcat_debug/` needed no change, having been covered already.
+- **The Spoonman Attack (menu 22) no longer cracks with another corpus's basewords.** The derived-output cache lives in `<hash file>.spoonman`, keyed on the *hash* file, and the only freshness test was `mtime(corpus) <= mtime(basewords.txt)` — so the corpus's identity never entered the cache key at all. Deriving from one corpus and then running the attack against the same hashes with a second corpus whose mtime happened to be older (any corpus downloaded or copied earlier, which is the common case) printed `[*] Reusing derived basewords and rules` and ran the *first* corpus's basewords and rules, silently. The cache directory now carries a `corpus.json` provenance record — the corpus's absolute path, size, and mtime — and is reused only when all three still match and the mtime check still passes. When it does not, the derivation re-runs and one line says which of those it was, so an operator watching an expensive re-derivation over an apparently warm cache can see why. A provenance file that is missing, empty, unreadable, malformed, has a field of the wrong type, or was written by a version predating this change counts as a miss and re-derives rather than raising. The record is also **deleted before a derivation starts** and written only once it succeeds, which makes it a validity marker rather than a stale label: `rulegen.generate()` rewrites `basewords.txt` in place and non-atomically, and the derivation is a two-pass pass over the whole corpus that an operator will plausibly interrupt, so a Ctrl-C after the new basewords landed but before the new record was written would otherwise leave the *previous* corpus's record beside the *new* corpus's basewords — and the next run against the previous corpus would match it, pass the mtime check, announce a cache hit and crack with the wrong basewords. A half-finished cache directory now has no record and is simply a miss. Switching the coverage tier still costs nothing: the tier picks among rule files already in the cache and does not invalidate it.
+- **`pcfgPrinceLingMaxCandidates` is no longer inert once a PRINCE-LING wordlist has been cached.** The same defect class as the Spoonman cache above, in `hcatPrinceLing`: the cached wordlist was named `pcfg_prince_ling_<ruleset>.txt`, but the setting is passed to `prince_ling.py` as `--size` and therefore decides the file's contents. Raising or lowering it reused the wordlist generated under the old value indefinitely, with nothing to indicate the new setting had not taken effect — the ruleset mtime is unchanged, so the staleness check was satisfied. The candidate budget is now part of the filename (`pcfg_prince_ling_<ruleset>_<size>.txt`), so each budget keeps its own cache and switching between two of them costs one generation rather than one per switch. Existing caches under the old name are simply ignored; delete them if the disk space matters.
+- **The Spoonman Attack (menu 22) no longer silently discards a leading or trailing space that is part of the password.** `usable_plaintext()` stripped surrounding whitespace, so a password padded with a space derived to the stripped form and the pair written out rebuilt the wrong string — on 0.06% of a sampled real corpus. It failed silently in the worst way: the reconstruction self-check compares against the same already-stripped password, so `selfcheck_failures` stayed empty while the output could not actually reproduce those lines. On a six-line synthetic corpus with padded entries, four lines were unreconstructable from the written baseword and rule files with the self-check reporting zero failures; all six are now reconstructable, the padding surviving as a `$ ` append or `^ ` prepend op. `usable_plaintext()` gained a keyword-only `keep_whitespace` parameter, default False so the `corpus_stats` and `llm` callers are byte-for-byte unaffected, and `rulegen.generate()` — the one caller that has to reproduce the password exactly — opts in. Blank and whitespace-only lines are still discarded under both settings. Leading whitespace is *decided* rather than kept blindly, because keeping it blindly would defeat the hash-prefix and `$HEX[...]` undo steps: on an indented line the space sits in front of the digest and the `$HEX[` marker, so neither detector matches and the entire line becomes the password — welding the digest's hex letters onto the baseword and spending 20-odd rule functions rebuilding its digits, silently, since the self-check then compares against that same poisoned string. Both detectors therefore run against the un-indented form and the indent is re-attached only if neither matched, so `  <digest>:word` still yields `word`, an indented `$HEX[...]` still decodes, and `  word  ` keeps both edges. A space *after* the separator is inside the plaintext field and is always kept, which is exactly where a password's own leading space appears. Verified byte-identical `basewords.txt` and all five `.rule` files against a 3,000-line synthetic corpus with no edge whitespace.
+
+- **The Spoonman Attack (menu 22) no longer under-counts literal fallbacks for all-letter passwords.** The fallback detector screened on the password containing a non-letter, as a proxy for "this came back as its own baseword because derivation bailed out". That misses a password made only of letters that still cannot be encoded — an uppercase letter past position 35 disqualifies every case encoding, and hashcat's position alphabet cannot address it — so those fell back silently and were counted as zero. Detection now tests whether `(password, ":")` is a *legitimate* derivation, which is true only for all-lowercase-ASCII input (no case ops, no interior, no affixes, so it cannot hit either limit) and false for every genuine bail-out.
+
+- **The Rosetta Mask Attack (menu 23) can now use the `vllm`/`openai` backends (#275).** It previously refused any backend but `ollama` outright, because upstream HashcatRosetta's `nlmask.py` hardcoded Ollama's `think` toggle on -- backwards for a vLLM server running a reasoning parser, which would route its whole structured response into `message.reasoning` and leave `message.content` empty. Fixed upstream (bumped the `HashcatRosetta` submodule to `437a3f8`), which added `think`/`extra_request_body` keyword parameters to `nlmask.generate_masks()`; `hate_crack/llm.py` gained `rosetta_backend_kwargs()` to shape those per backend (`vllm` sends `think=False` plus `chat_template_kwargs={"thinking": false}` -- not the superficially similar `enable_thinking`, which silently returns an empty object instead of erroring; `openai` sends `think=False` only; `ollama` is unchanged) and the pre-flight gates in `main.py`/`attacks.py` are gone. `RosettaBackendRefused` still exists, now as a capability guard: a `HashcatRosetta` checkout older than the fix still gets a clear "update the submodule" message on a non-Ollama backend instead of a raw `TypeError`.
+
+- **`OLLAMA_NO_CLOUD` now guards the configured destination, not just the model name (#274).** The check was a model-name heuristic (`is_cloud_model()`, looking for Ollama's `-cloud` tag suffix), so it did nothing on the `vllm`/`openai` backends added above — it stayed `False` no matter where `OLLAMA_HOST` pointed, silently letting recovered plaintexts and client target details reach any configured server. A new `llm.is_offsite_url()` check now runs alongside the existing name check for all three backends: loopback, private, and link-local addresses (and `localhost`/`.local`/`.internal`/`.lan`/`.localdomain` names) are treated as local, a hostname that resolves only to such addresses is local, and anything else — including a hostname that fails to resolve at all — is treated as offsite, fail-closed. With `OLLAMA_NO_CLOUD=true`, an offsite destination is refused (`llm.CloudDestinationRefused`) before any request is built; with it left at its default `false`, the request still proceeds but a warning is printed first, naming the destination and the setting that would have refused it. Same key, same default — no `.env` migration needed.
+
+### Added
+- **The Spoonman Attack (menu 22) now offers a baseword-side choice, which is the side that actually limits it.** The only knob the menu had capped the *rule* set, and the rule set is not what the attack runs short of: scored against a held-out half of a 360,000-password corpus, the top-50% rule tier reached 1.6% of unseen passwords and the full set — roughly 35x more rules — reached 4.8%, while 47-57% of the misses were a missing **baseword** and only 18-21% a missing rule (94% of the derived baseword list is entries seen exactly once). A new "baseword source" menu follows the rule-set prompt: derived basewords only (unchanged behaviour), derived basewords **plus the configured wordlists** (marked recommended, since that is the dimension with room in it — and enumerated with `list_wordlist_entries`, so a collection unpacked into `wordlists/rockyou/`-style subdirectories is included rather than silently dropped), or derived basewords capped to the most frequent N. `hcatSpoonman()` gained `extra_wordlists` — appended after the derived list, which hashcat reads first in straight mode, with a path that does not exist named and skipped rather than aborting the run — and `baseword_cap`, backed by a new `rulegen.generate(baseword_caps=...)` that writes `basewords.top{N}.txt` files mirroring the existing `rules.top{N}.rule` ones and returns them in `capped_basewords`. The uncapped `basewords.txt` is always written. Two details keep a run from being wasted: the **corpus itself is skipped** if it turns up among the extra wordlists — as is any offered *directory* that contains it, because hashcat walks a directory operand and the extras are enumerated with `list_wordlist_entries`, which includes directories on purpose, so a corpus sitting in its own subdirectory of the wordlist collection would otherwise be fed straight back in (both checks compare by `realpath`, so a symlink, a `./` prefix or a symlinked parent directory cannot slip past; the whole directory is dropped, since a hashcat operand is all-or-nothing, which does cost any other wordlist sitting beside the corpus in it — keep the corpus outside the wordlist tree to have both). Feeding it back in is a routine accident rather than an exotic one, because the corpus prompt's base directory *is* the configured wordlist directory the recommended option enumerates — and every line of it is a `<digest>:<plaintext>` record that can never be a candidate, so on a large corpus it would quietly dominate the run; and a cap **does not invalidate the cache**, since N is operator-chosen and re-deriving for a new one would mean a fresh two-pass read of the whole corpus (hours, on the corpus sizes `rulegen.py`'s memory bound is written for). Because every capped file is a prefix of `basewords.txt` by construction, a cap the cache does not hold is truncated out of the cached list instead, byte-identically, without touching the provenance record — a capped file left behind by an earlier derivation is rebuilt rather than reused, and a cap that cannot be written falls back to the full list rather than failing the attack. The optimized-kernel length warning counts the *derived* list actually being run — the capped file when a cap is in effect, rather than the uncapped one — but extra wordlists are outside its scope: it runs before the operand list is assembled, and an extra can be a directory, so over-long entries in one are dropped by `-O` unreported. That is part of why the count it prints is worded as a floor ("at least N"). `baseword_cap=0` means no cap rather than an empty dictionary. The cap is presented as what it measured as: a keyspace budget, not an accuracy win — a 5,000-baseword cap against the top-50% rules reached 0.4% of unseen passwords for 0.011e9 candidates, against 1.6% for 0.338e9 uncapped. The attack's intro text, which claimed a capped rule set "gets most of the coverage for a fraction of the keyspace", now says what the measurement shows instead.
+- **The Spoonman Attack (menu 22) now says how many basewords the optimized kernel will throw away.** hashcat's `-O` caps candidate length and drops anything over it in silence — verified against hashcat v7.1.2 in mode 0, a 31-character plaintext cracks, a 32-character one does not, and hashcat prints no warning and exits 0. Spoonman's baseword list is unusually exposed to this because it holds whole literal passwords (every letterless or unrepresentable corpus entry becomes its own baseword), so a corpus with long entries lost them with nothing to show for it. The attack now counts the over-cap basewords before starting hashcat and says so, naming the flag that would keep them (`--no-optimized-kernel` / `--no-optimize`). The count is reported as **“at least N”**, and 31 is named as the figure verified for **mode 0** rather than as a universal cap, because it is a floor in two directions: Spoonman runs at any hash mode and the real `-O` cap varies with the mode, and a rule that appends characters can carry a baseword that fits on its own past the cap. Nothing else changes: it does not prompt, does not filter candidates, and does not alter what hashcat is asked to run. The cap lives in a module-level constant (`OPTIMIZED_KERNEL_MAX_PLAIN_LENGTH`) and no attempt is made to derive it per hash mode. The count streams the baseword file a line at a time, since it can be nearly as large as the corpus; a list over 64 MB gets a one-line notice first so the pause before hashcat starts does not look like a hang, and an unreadable file skips the check rather than failing the attack.
+- **The LLM Attack (menu 12) and Rosetta Mask Attack (menu 23) can now target a vLLM or generic OpenAI-compatible server, not just Ollama.** New `LLM_BACKEND` (`ollama`/`vllm`/`openai`, default `ollama`) and `LLM_API_KEY` (default the literal `ollama`, the placeholder Ollama's own server ignores) `.env` keys select the backend and its credential; the existing `OLLAMA_*` keys are unchanged and keep owning the host, model, timeout, context and sampling for every backend. The api key hate_crack sends is no longer hardcoded, so a vLLM server started with `--api-key` no longer gets a 401. vLLM accepts and ignores Ollama's `options` request field (HTTP 200, not 400), but a vLLM server running a reasoning parser routes the whole structured response into `message.reasoning` and leaves `message.content` empty, which broke `instructor`'s JSON parsing; the vLLM branch now sends `chat_template_kwargs={"thinking": false}` instead, which was verified against a live vLLM 0.26.0 server to populate `content` correctly (the superficially similar `enable_thinking: false` does not error but silently returns an empty object). At the time this landed the Rosetta mask attack (menu 23) still required `LLM_BACKEND=ollama` for a separate, upstream reason -- see the (#275) fix above, which lifts that restriction.
+
+## [2.29.1] - 2026-08-18
+
+### Fixed
+- **The Top Mask and Fingerprint attacks now decode `$HEX[...]`-wrapped plaintexts before consuming them.** hashcat wraps a cracked plaintext in `$HEX[...]` whenever it holds a byte that would break the outfile's colon-delimited format — a non-UTF-8 byte, a control character, or a literal `:` in the password — which is routine for the modes that allow full Unicode, NTLM among them. `hcatLMtoNT` and `hcatRecycle` already ran the extracted plaintext through `convert_hex()`; `hcatTopMask` (which feeds `PACK/statsgen.py`) and `hcatFingerprint` (which feeds the expander binary) did not, and neither of those tools has any `$HEX[...]` awareness of its own. A wrapped password therefore reached them as the literal wrapper text, polluting Top Mask's mask statistics and producing junk fingerprint fragments for exactly the passwords — Unicode, special characters — where the attack would otherwise be most useful. The extract-then-decode sequence is now factored into `_extract_cracked_plaintexts()` and all four call sites go through it, so a fifth caller cannot repeat the omission by hand.
+
+## [2.29.0] - 2026-08-18
+
+### Added
+- **The Fingerprint Attack now follows the methodology it documents.** The [hashcat wiki](https://hashcat.net/wiki/doku.php?id=fingerprint_attack) describes the attack as combining expander output "with itself OR with dictionary entries", escalating from small dictionaries to big ones. `hcatFingerprint` only ever self-combined a single fixed expander length, re-expanded the whole cracked corpus on every convergence-loop iteration, and put no bound on the resulting `-a1` keyspace — which is O(n²) in fragment count. Four changes close that gap. It now escalates through an expander-length chain (`7 -> 14 -> 21 -> ...` up to a configurable ceiling, default 21), running each length to convergence before advancing, so `expander_len` is renamed `max_expander_len` to say so. Each convergence-loop iteration expands only the *newly* cracked plaintexts and merges the fragments into the accumulating `.expanded` file, rather than re-running the expander over the entire growing corpus each time. An optional dictionary wordlist combines expanded fragments against a real wordlist in both orders (`expanded+dict` and `dict+expanded`) alongside the self-combination, and every `-a1` combination now carries a cheap `-j c -k c` capitalize rule on both sides for free `Capitalized`-variant coverage. Finally, a keyspace guardrail checks the candidate count (`left_lines * right_lines`) before each `-a1` call and **skips** an over-threshold combination with a warning rather than asking about it: fingerprint is launched once and then left alone for its whole duration — the standalone menu item no less than `extensive_crack`'s chain — so a `y/N` prompt mid-run has nobody there to answer it and simply hangs the attack, which was reported live with hashcat idle and the next step waiting on stdin. The standalone Fingerprint Attack instead asks for the threshold **up front**, before hashcat starts (default 50,000,000,000 candidates; `0` for no limit), which is what keeps "I know this hash list is big, let it run" possible without ever blocking later. `extensive_crack` passes nothing and keeps the default, since it cannot prompt mid-chain. The two dictionary directions are guarded once between them, not once each, because `len(a)*len(b)` and `len(b)*len(a)` are the same number and asking twice about one decision is noise.
+- **`hcatFingerprintWordlist`** gives the Fingerprint Attack's dictionary-combination wordlist a configured default, which `hcatCombinationWordlist` and `hcatHybridlist` already had for the other combination attacks — without it, every run meant re-typing the same path. It is a `csv_list` (default `[]`), matching its `*Wordlist` naming siblings rather than `hcatMiddleBaseList`'s singular-string shape, because a user setting it the way its siblings are set (`["dynamic-all.txt.gz"]`) would otherwise get `has the wrong type; keeping schema default`. Fingerprint combines against exactly one wordlist per run, so the first list entry wins and a config holding more than one prints a notice naming which, instead of silently dropping the rest. `fingerprint_crack` offers the configured default first (`Combine against configured wordlist 'X'? (Y/n)`), mirroring `combinator_crack`/`hybrid_crack`, and falls back to manual entry. Declining the prompt passes an explicit `""`, which does *not* fall back to the config — so a configured default can still be opted out of for a single run — while `extensive_crack` omits the argument entirely and picks the default up automatically.
+- The fingerprint dictionary-wordlist prompt tab-completes against `hcatWordlists`, like every other wordlist prompt in the file. The glob-based completer `_prompt_wordlist_paths` already used is now `_wordlist_path_completer`, shared by both call sites rather than duplicated.
+
+## [2.28.2] - 2026-08-18
+
+### Fixed
+- **A cracked plaintext is now extracted as the last colon-delimited field, not the second one.** `_write_delimited_field(..., field_index=2)` split `.out` and `.lm.cracked` lines from the left and took the second field, which is correct only when the hash side contains no colons of its own. For modes whose hash component embeds them — NetNTLM's `user::domain:challenge:response:plain`, some Kerberos and PDF formats — a *fragment of the hash* was passed downstream as though it were the cracked password, silently degrading the Fingerprint expander, Top Mask's statsgen pass, LM-to-NT recombination, and rule Recycle for exactly those hash types. A new `last_field=True` mode extracts via `rsplit(delimiter, 1)[-1]`, which is correct no matter how many colons precede the plaintext, and all four extraction call sites now use it.
+
+## [2.28.1] - 2026-08-16
+
+### Fixed
+- **The Rosetta attack no longer writes rules hashcat rejects.** A debug log that hate_crack appended to across the `--debug-mode` 4-to-5 switch holds records of both shapes, but HashcatRosetta picked one mode per *file* and forced it on every line. Each mode-5 record in a mode-4-majority log therefore came back with the wordlist as its candidate and the real candidate glued onto the rule, so `rules.rule` carried lines like `$1:<candidate>` — and hashcat answered with `Skipping invalid or unsupported rule in file ... on line N` for each one. On a 12,326-entry capture across the logs in `~/.hate_crack/hashcat_debug`, 111 of 4,686 derived rules were unusable; after the fix, two are, and neither is a mis-split (an empty line and one rule this hashcat build does not implement). Fixed upstream in HashcatRosetta, pulled in by bumping the submodule to `b2c6e13`; the bump also carries an nlmask `</think>`-preamble fix and a benchmark test fix. Regenerate an existing `<hash file>.rosetta/rules.rule` by re-running the attack — the old file is not repaired in place.
+
+### Changed
+- **The Rosetta attack keeps every winning rule by default.** The top-rules prompt defaulted to 100 while the top-basewords prompt beside it defaulted to all, so pressing Enter through both quietly discarded every rule ranked below the hundredth — including, for a large debug log, rules that had already cracked hashes on this target. Both prompts now default to all; entering a number still caps either, and the resulting keyspace is still printed before hashcat starts.
+
+## [2.28.0] - 2026-08-16
+
+### Added
+- **The Ad-hoc Mask Attack accepts hashcat 7's `?5`–`?8` custom charsets.** hashcat 7 raised the number of user-defined charsets from four to eight (`-5` through `-8`); the attack recognised only `?1`–`?4`, so a mask using the new slots ran with those charsets undefined and hashcat rejected it. The mask-token prompt now advertises `?1-?8` when the installed hashcat is 7 or newer, and a mask using `?5`–`?8` against a known-older hashcat says so before the run instead of failing inside it. An unreadable version is treated as "let hashcat decide" rather than as a refusal.
+
+### Changed
+- **The Ad-hoc Mask Attack (option 14) only asks about the custom charset slots the mask uses.** It asked for `-1` through `-4` unconditionally, so the common case — a mask of built-in tokens like `?u?l?l?l?d?d` — meant four prompts that could only be answered by pressing Enter four times. `?1?3?d` now asks about `-1` and `-3` and stops there. A referenced slot left blank is still skipped rather than re-asked, but now says that hashcat will reject the mask, which it does (`Custom-charset 1 is undefined.`). Detection walks the mask token by token instead of substring-matching, because `??` is hashcat's escape for a literal `?`: `??1` contains no reference to charset 1.
+
+### Added
+- **The Ad-hoc Mask Attack (option 14) can now run the mask incrementally.** After the mask (and after the `-1`–`-4` charset prompts, when a mask was typed rather than chosen from a file) it asks whether to increment; answering yes prompts for an increment minimum and maximum. Either bound may be left blank, and leaving both blank passes a bare `--increment` so hashcat derives the range from the mask itself — the full keyspace. Previously the only way to try lengths below the mask's own was to run the attack once per length.
+- **`--migrate-hashcat-home`** copies the contents of a legacy `~/.hashcat` into the directory hashcat 7 actually uses, and startup now names what is stranded there. It never overwrites and never deletes: a colliding name is copied as `<name>.from-legacy` (merging two potfiles is the operator's call, not a startup helper's), and removing the old directory is left to you.
+
+### Fixed
+- **hate_crack no longer pins hashcat's pre-7 data directory, and no longer resurrects it.** hashcat 7 moved per-user state to `$XDG_DATA_HOME/hashcat` (default `~/.local/share/hashcat`) and its kernel cache to `~/.cache/hashcat`, and prints a seven-line notice for as long as `~/.hashcat` exists. hate_crack shipped the old path as the `hcatPotfilePath` default *and* `os.makedirs()`'d it on every hashcat invocation, with three consequences. The notice could never be cleared — deleting the directory as hashcat instructs was undone by the next run. `--potfile-path` pointed at a potfile hashcat had stopped writing, so cracks made outside hate_crack were invisible to `--show` and to the Hashview upload paths, and the two potfiles silently diverged. And because the notice goes to *stdout* as well as stderr, it polluted the output of every `hashcat --stdout` the test suite parsed: `test_every_builtin_charset_is_ascii_only` saw `?a` as 102 characters rather than 95 and failed, which read as hashcat having gained non-ASCII charsets. (Shipped `--show` parsing was unaffected — its `":" in line` filter happens to reject all seven notice lines.) The default is now the `auto` sentinel, resolved per run by the new `hate_crack/hashcat_paths.py` against the installed hashcat's major version, so hashcat 6 installs keep `~/.hashcat` and 7+ installs follow it — including a non-default `XDG_DATA_HOME`, which hardcoding `~/.local/share` would have missed. `""` keeps its existing meaning of "pass no `--potfile-path`". The two test helpers that probed `~/.hashcat/sessions` for writability now resolve the directory too; they were both testing the wrong location and recreating the directory the tool asks users to delete.
+- `test_toggle_rule_parses_with_and_without_loopback` now feeds hashcat a one-word wordlist instead of an empty file. hashcat 7 rejects an empty dictionary outright (`No usable dictionary file found.` on stderr, which that test treats as a failure), so the whole suite failed against a hashcat 7 install — and it failed only in the no-`--loopback` half, since `--loopback` supplies its own induct candidates. The empty file never exercised rule *application* in the first place: zero candidates means zero rules applied, so only the rule file's parse was covered.
+- The `config.json.example` drift guards now reject duplicate keys. `json.load` accepts a repeated object key and keeps the last one, so a doubled line parsed cleanly and every existing guard still passed — the key set collapses the pair, so the counts and the type tallies all matched. A malformed example could ship with the suite green, which is exactly what happened while adding `hcatCorpusProfileMaxLines` (an edit written through both the root path and the package symlink that points at it). Loading now goes through `tests/_json_strict.py`, which raises on a duplicate at any nesting depth, and a mutation test duplicates a real line from the real example to prove the guard fires rather than assuming it does.
+- The corpus-profiling pass behind the LLM attacks is now bounded and reports live progress. Selecting a large pattern source printed `Analyzing pattern source...` with only an elapsed counter while `corpus_stats.summarize()` read *every* line at roughly 135k lines/s — on the 29 GB hashmob `official.found` corpus (~3.57B lines) that is over seven hours of pure-Python work, and the exact distinct-password set it builds would exhaust memory long before finishing. Past `hcatCorpusProfileMaxLines` (new `config.json` key, default 5,000,000) the pass now samples evenly across the file's whole byte range instead of reading it end to end, finishing that corpus in ~51s. Sampling is spread across ~2,000 anchor points rather than truncated to a head slice, because large wordlists are ordered and their first N lines describe the ordering rather than the corpus. A sampled summary no longer tells the model its figures "cover the ENTIRE corpus"; it states the estimated corpus size and the coverage percentage instead.
+- The spinner message for that pass now reads `Profiling <source> locally (no LLM yet)...` and carries a live line counter. The old wording read as though the model had stalled, when in fact `corpus_stats` never contacts Ollama at all. `progress.spinner()` now yields a `SpinnerHandle` whose `set_detail()` updates the text in place, so any long local operation can report progress without owning the repaint loop.
+
+## [2.27.0] - 2026-08-14
+
+### Added
+- **Corporate Masks Brute Force attack (option 24)** — statistical 8-14 character hashcat masks derived from analysis of 3.2M NTLM hashes cracked on real engagements, powered by [Corporate_Masks](https://github.com/golem445/Corporate_Masks). Prompts for min/max length, runs each as a separate hashcat invocation, gracefully handles missing mask files, and supports optimized kernels (#269).
+
+### Fixed
+- The startup update check no longer offers a downgrade on `nightly-dev`. That branch publishes release candidates aimed at the version the batch is heading toward, so its version sorts *below* the release it becomes (`2.26.2rc1` < `2.26.2` under PEP 440). Once the target release shipped, a checkout that already contained it — plus every commit since — still compared as older, and the notice fired on every start until the branch's target moved past it. The guard now asks whether HEAD *contains* the release commit (`git merge-base --is-ancestor`) rather than whether it *equals* it; equality is the degenerate case, so the previous behaviour is preserved. Non-git installs still fall back to the version comparison (#271).
+- Startup now warns when `optimizedKernelAttacks` in `config.json` is missing attacks that use `-O` by default, naming each one and the file it came from. That setting is a whole-list opt-in, so a `config.json` written before an attack existed pins the list without it and the attack never gets the optimized kernel — silently, since the only symptom is reduced speed. `hcatRosettaMask` shipped degraded for eleven days before this surfaced, and `hcatCorporateMasks` was degraded the day it landed. The list is also how an attack is deliberately opted out, and the two cases are indistinguishable, so this warns rather than repairing the list (#270).
+
+## [2.26.2] - 2026-08-13
+
+### Fixed
+- Fresh git worktrees' first `pytest` run would fail ~23 tests in hashcat_rosetta-dependent test files, all with "AssertionError: hcmask validity check failed". The issue: `git submodule update --init` was deferred to a test body, which runs *after* collection, but `hate_crack.main`'s module-level imports cache the ImportError if HashcatRosetta is not found at import time (collection phase). Submodule initialization is now part of `pytest_configure`, which runs *before* collection, so the import always sees populated submodules on the first run. Additionally fixed: the guard logic now correctly detects git worktrees (where `.git` is a file, not a directory), checks submodule status before running update (so developers can intentionally move a submodule to a different commit/branch without pytest silently resetting it), adds a 600s timeout with network stalling protection and opt-out via `HATE_CRACK_SKIP_SUBMODULE_INIT=1` for CI environments, and avoids potential hangs from unresponsive networks or credential prompts (#266).
+
+## [2.26.1] - 2026-08-13
+
+### Fixed
+- `tests/test_random_rules_attack.py`'s `load_cli_module()` now purges only `hate_crack.main`/`hate_crack` from `sys.modules` instead of deleting every `hate_crack.*` module except a hand-maintained preserve list. The old approach let any name-bound import (e.g. `hate_crack.api`'s `load_cache`/`append_to_cache`) drift out of sync with a reloaded module, which would silently defeat `tests/conftest.py`'s isolation fixtures and risk writes to the operator's real `~/.hate_crack` cache file (#264).
+
+## [2.26.0] - 2026-08-12
+
+### Added
+- A regression test locking in that `upload_cracked_hashes` preserves leading/trailing whitespace in cracked plaintexts (#244).
+- LLM target research now also recalls a parent company / acquisition history for the named organization, alongside industry and location, and uses it when generating password candidates (#263).
+
+### Fixed
+- OMEN training now decompresses gzip-compressed training wordlists, matching the N-gram attack's existing behavior (#257).
+- Config resolution now warns when a `config.json`/`.env` at a higher-priority candidate root (the repo checkout, or the installed package directory) is shadowing one at a lower-priority root (`~/.hate_crack`), instead of silently ignoring the shadowed file forever. A stray file left behind in a checkout could otherwise make a real, hand-configured `~/.hate_crack/config.json` (hashcat path, wordlist/rules directories, etc.) look like it had been silently replaced with schema-default placeholders on first run — which file wins is unchanged, this only makes the shadowing visible (#246).
+
+## [2.25.1] - 2026-08-04
+
+### Fixed
+- **`--update`/`--nightly` refused to run on an install that had ever built the
+  bundled binaries**, printing `Cannot auto-upgrade: uncommitted changes` even
+  though the operator had not touched a single tracked file. `make
+  submodules`/`make install` build hashcat-utils, princeprocessor, OMEN and the
+  other bundled binaries inside their own submodule working trees, leaving
+  generated sources, object files, and a touched `Makefile` there — content
+  `git status --porcelain` reports as `M <submodule>` on the superproject. The
+  pre-upgrade dirty check now passes `--ignore-submodules=dirty`, so build
+  byproducts inside a submodule no longer block the upgrade; a submodule
+  actually pinned to a different commit than recorded still does, since
+  `checkout -B` on the superproject cannot fix that anyway.
+
+## [2.25.0] - 2026-08-04
+
+### Added
+- **`upload_cracked_hashes` now batches uploads into 10,000-line chunks per
+  POST to Hashview's `/v1/hashes/import/<hash_type>` endpoint, instead of
+  sending the whole file as one single request.** Large submissions (e.g.
+  800k hashes) were failing outright, with no partial progress retained on
+  failure. Each batch's cache keys are recorded immediately after that
+  batch's own successful POST, so a later batch's failure still leaves
+  earlier batches deduped for a retry — a re-run resumes instead of
+  resending everything. `upload_hashfile` is unchanged.
+- **The Rosetta menu (`23`) gained a fourth choice, an LLM Mask Attack**: describe
+  the passwords you expect in plain English and a local Ollama model
+  (`llm.generate_masks`) turns that description into hashcat brute-force
+  masks, which are written to `<hashfile>.hcmask` and run immediately with
+  `-a 3` (`hcatRosettaMask`). No corpus statistics are sent to the model —
+  this mode is driven entirely by the operator's description, unlike the
+  existing rule-mining choices `1`-`3`.
+
+### Changed
+- **`.hcmask` files are now removed by `cleanup()` when the session ends.** This
+  affects the existing Top Mask attack, which generates `.hcmask` files via PACK's
+  `maskgen.py` — previously these generated mask files were left behind after a
+  session for re-use or inspection; they are now cleaned up along with other
+  session artifacts.
+- **`llm.generate_masks` now delegates entirely to
+  `hashcat_rosetta.nlmask.generate_masks`** instead of a second, hand-maintained
+  Atomic Agents prompt (`_MASK_PROMPT`/`MaskAttackOutput`, both removed). The LLM
+  Mask Attack's prompt, output schema, hcmask syntax validation, and the
+  one-retry-on-failure behavior all now come from HashcatRosetta itself, so this
+  feature can't silently drift from that project's own SYSTEM_PROMPT fixes the
+  way it had (HashcatRosetta had already independently fixed a `[...]`
+  bracket-syntax hallucination, an arbitrary "always pick 6" category cap, and a
+  word-decomposition bug that this module's own prompt never guarded against).
+  The practical result is that the LLM Mask Attack now supports custom charsets
+  (`?1`-`?8`, up to 8 per HashcatRosetta's own hashcat-verified limit) for the
+  first time — every generated mask combines its custom charsets (if any) into
+  one canonical hcmask line (e.g. `aeiou,?1?1?1?1?d?d`) via
+  `hashcat_rosetta.mask.format_hcmask_line`.
+- **`_valid_hcmask` now delegates its grammar check to
+  `hashcat_rosetta.mask.parse_hcmask_line`** instead of a hand-rolled
+  placeholder-letter scanner, and no longer blanket-rejects a `,` or `\`. Both
+  are legitimate hcmask syntax (a custom-charset separator and an escape
+  character respectively) that the old checker couldn't tell apart from a
+  malformed mask — it had no concept of custom charsets at all. The old
+  32-character length cap (a runaway-output guard, not a real hashcat limit) is
+  also gone, replaced by hashcat's own real 256-position limit, which
+  HashcatRosetta's `parse_hcmask_line` now enforces directly. Embedded
+  newline/carriage-return/tab and a leading `#` are still rejected locally —
+  those are `.hcmask` *file*-safety concerns `parse_hcmask_line` has no reason
+  to know about, not mask grammar.
+
+### Fixed
+- **Rule-based attacks no longer die outright against a hashcat build that
+  predates `--debug-mode` 5 support.** `_add_debug_mode_for_rules` always
+  requested mode 5, so a hashcat older than the one that introduced it
+  rejected every `-r` attack with `Invalid --debug-mode value specified.`
+  (exit 255) before any cracking started. `_run_hcat_cmd` now captures stderr
+  for debug-mode invocations, detects that specific rejection, retries the
+  same attack at mode 4, and drops the request to mode 4 for the rest of the
+  run so later rule-based attacks ask for it directly instead of failing and
+  retrying every time.
+- **Added `--rule-debug-mode`/`--no-rule-debug-mode`** (persisted default:
+  `rule_debug_mode_enabled` in config.json, `true`) to fully disable the
+  `--debug-mode`/`--debug-file` flags rule-based attacks otherwise always add.
+  This is unrelated to the existing `--debug`/`--no-debug` flag, which only
+  controls hate_crack's own verbose logging and never touched hashcat's
+  debug-mode flags.
+- **`rosetta_derive` misparsed a batch mixing `--debug-mode` 4 and 5 logs,
+  logging one file's lines as `Skipping malformed mode-5 line (missing
+  wordlist field)` and dropping them.** It merged every selected log's raw
+  lines into one list before handing them to HashcatRosetta, whose format/mode
+  detection samples only the start of whatever it's given -- so whichever
+  file's lines landed first decided the mode for the whole batch. It now calls
+  HashcatRosetta's `analyze_debug_files()`, which detects each file's format
+  and mode independently (requires HashcatRosetta >= the commit adding that
+  method; bumped alongside this fix).
+- **`rosetta_derive` stopped reading debug logs after 1,000,000 lines and
+  printed `[!] Stopped at 1000000 debug lines`, silently discarding the
+  remainder of large captures.** The cap and its `max_lines` parameter are
+  removed; every line of every selected log is now read.
+- **A cracked NTLM plaintext that hashcat `$HEX[...]`-wraps for a reason
+  unrelated to encoding (an embedded colon, a control character) was
+  corrupted before reaching Hashview, which then rejected it with
+  `Plaintext for hash <hash>, was found to be invalid` even though
+  hate_crack's own local validation had accepted the pair.** `_wire_field_bytes`
+  always reconstructed `$HEX[...]`-wrapped bytes for UTF-16LE modes (900,
+  1000, 1731) as latin-1 code points needing zero-extend repair — correct
+  when hashcat wrapped genuinely non-UTF-8 bytes, but wrong when the wrapped
+  bytes were already valid UTF-8 text, which double-encoded them (e.g.
+  `café:` became `cafÃ©:`) into a plaintext that no longer hashed to the
+  claimed digest. It now mirrors `_digest_for_type`'s UTF-8-first check:
+  valid UTF-8 is sent as-is, and the latin-1 zero-extend path is used only
+  when the wrapped bytes fail to decode as UTF-8.
+
+## [2.24.0] - 2026-08-02
+
+### Fixed
+- **A cracked password with a leading or trailing space was flagged as a
+  hash/plaintext mismatch and skipped during Hashview upload.** Both
+  `upload_cracked_hashes` and `_read_found_pairs` used a bare `.strip()` on the
+  raw `hash:plain` line before splitting on `:`, which strips *all* whitespace,
+  not just the line terminator — so a password's own leading/trailing space was
+  eaten before validation or before the value reached the potfile/Hashview.
+  `upload_cracked_hashes` also had a second, redundant `.strip()` on the
+  already-split plaintext field. Both now use `rstrip(b"\r\n")` to drop only
+  the newline, mirroring the byte-preserving fix already applied for non-UTF-8
+  plaintexts in #216.
+
+- **Wordlist and rule pickers no longer list directories and dot-files as if
+  they were files** (#233). `list_wordlist_files()` was a bare `os.listdir` with
+  an extension blocklist and a one-off `.DS_Store` exclusion, so subdirectories
+  and dot-files were numbered in the pickers as wordlists, and several callers
+  joined those names onto a directory and handed the result to hashcat as a
+  *file* argument. The same pattern was repeated inline for rule listings.
+
+  Listing is now typed: `list_wordlist_entries()` returns `DirEntry(name,
+  is_dir)`, `list_wordlist_files()` and `list_rule_files()` return files only,
+  and dot-files are dropped wholesale rather than by name.
+
+  The policy follows what hashcat actually accepts, verified against the binary:
+  a straight-mode (`-a 0`) dictionary position takes a directory and consumes
+  every file inside it, while a `-r` rulefile and an `-a 1` operand must be
+  files. So Quick Crack, the standard Dictionary attack and rule generation keep
+  offering directories — marked with a trailing `/` and coloured — while OMEN
+  training, Markov training, the rules picker and the LLM attack's unattended
+  `-r` loop take files only. The LLM loop was the worst of these: it ran
+  `hashcat -r <entry>` over every entry with nobody watching, so one stray
+  subdirectory failed the run.
+
+  Also fixed: the rules re-listing after a Hashmob download dropped even the
+  `.DS_Store` filter; the rule tab-completer was the only one of six not marking
+  directories, and globbed inconsistently once you typed; the Hashmob
+  already-downloaded set could let a directory shadow a rule filename and skip a
+  real download; and `wordlist_optimize`'s "is this empty" test was defeated by
+  a stray `.DS_Store`.
+
+  Colour is passed parallel to the entries and applied after padding, because
+  `print_multicolumn_list` pads with `ljust` and truncates on `len()` — an
+  escape baked into an entry string would be counted as visible width, leaving
+  the grid ragged and a truncated name able to strand an unreset colour.
+
+### Added
+- Hashview uploads now skip hashes already uploaded in a previous run, tracked in `~/.hate_crack/hashview_uploaded_cache.txt` (`upload_cracked_hashes`, `upload_hashfile`).
+
+### Fixed
+- **Uploading a hashfile and later uploading its cracked results silently
+  dropped the cracked-results upload.** Both `upload_hashfile` (send hashes to
+  be cracked) and `upload_cracked_hashes` (send plaintexts back) computed the
+  same cache key for a given `(hash, hash_type)` pair, so the two operations
+  collided: after uploading a hashfile, the follow-up upload of its cracked
+  results saw every hash as already "uploaded" and skipped all of them,
+  while still printing `✓ Success`. The cache key is now namespaced per
+  operation (`cracked` vs. `hashfile:<customer_id>`), so the two paths can no
+  longer collide, and re-uploading the same hashlist for a different
+  customer is no longer silently skipped either.
+- Two call sites in `main.py` checked `"hashfile_id" in result` (presence)
+  rather than truthiness, so `upload_hashfile`'s all-cached response
+  (`hashfile_id: None`) passed the guard as if a real hashfile was created —
+  the interactive menu offered to create a job against `None`, and the
+  `upload-hashfile-job` CLI subcommand called `create_job(None, ...)` instead
+  of reporting an error. Both now check `result.get("hashfile_id")`.
+- `upload_cracked_hashes` raised a misleading "No valid hashes to upload"
+  exception when a file mixed already-cached hashes with a genuinely invalid
+  line, blaming the invalid line while hiding that the cached hashes were
+  actually fine. The graceful early return now fires whenever any hashes were
+  cached, regardless of whether others were also invalid.
+- **A cracked NTLM (mode 1000) plaintext with a genuine multi-byte UTF-8
+  character (e.g. `£`) was rejected as "plaintext does not match hash under
+  mode 1000" and skipped during Hashview upload.** `_digest_for_type`
+  zero-extended each *UTF-8 byte* of the plaintext before UTF-16LE encoding —
+  correct only for raw bytes recovered from a `$HEX[...]` wrapper — instead of
+  encoding the actual Unicode codepoints, doubling every non-ASCII character
+  into two UTF-16 code units and producing the wrong digest. Mode 1000 now
+  prefers decoding the raw bytes as UTF-8 (exact for genuine text, a no-op for
+  the zero-extend path since `$HEX`-wrapped bytes are only ever non-UTF-8 by
+  construction), falling back to the existing latin-1 zero-extend only when
+  that decode fails.
+
+## [2.23.0] - 2026-07-31
+
+### Changed
+- **Listing a customer's hashfiles takes one request instead of 26.** Hashview
+  had no route to list a customer's files, so `get_all_customer_hashfiles`
+  approximated one by querying `/v1/hashfiles/hash_type/<N>` once per entry in a
+  26-entry table of common hashcat modes, pulling down every hashfile of each
+  type server-wide and discarding the ones belonging to other customers. Against
+  a live server a single one of those 26 requests measured 88 seconds. It was
+  also incomplete by construction: a hashfile of a type outside the table was
+  invisible, which is why the "no hashfiles" message had to hedge about whether
+  the server was old or the customer merely had nothing of a common type.
+
+  Hashview v0.8.3-dev added `GET /v1/customers/<id>/hashfiles`, which filters
+  server-side and covers every hash type. That route is used when present. Older
+  servers answer it with a 404 and fall back to the sweep unchanged, so nothing
+  regresses on them; passing `hash_types` explicitly still forces the sweep.
+
+### Fixed
+- **`python -m hate_crack --help` no longer calls itself `__main__.py`.** The
+  parser took its program name from whatever argparse inferred, which is the
+  module filename under `-m`. The console script was unaffected, since argparse
+  derives the name from the script basename there, so the wrong name only ever
+  showed up on the module invocation path. The name is now stated explicitly.
+
+  The existing coverage in `test_installed_tool_execution.py` could not catch
+  this: it invoked the tool through a bare `hate_crack` on `PATH`, which resolves
+  to the console script and therefore reads correctly either way. Worse, `PATH`
+  is not guaranteed to point at this checkout — an unrelated install elsewhere on
+  the machine would silently become the thing under test, and did. Those tests now
+  run the console script belonging to the interpreter running them, and a new test
+  covers the `-m` path that actually regressed.
+
+## [2.22.2] - 2026-07-31
+
+### Fixed
+- **`tools/`, `packaging/`, and the `hate_crack.py` entry point are now linted
+  everywhere, and a guard proves it.** No lint entry point named `tools/` or
+  `packaging/` at all, so an `F541` and a formatting drift sat unnoticed in
+  `tools/ollama_benchmark.py` until someone ran ruff by hand (issue #237). The
+  Makefile, `prek.toml`, and `.github/workflows/ci.yml` now all scope ruff to
+  `hate_crack tests tools packaging hate_crack.py`, and
+  `tests/test_lint_scope.py` reads those files directly so it fails the moment
+  any of them drifts from the others.
+
+  `hate_crack.py` -- the documented entry point (README.md) -- was invisible to
+  the drift guard itself: it only ever swept directories, so a root-level
+  module could never be flagged as unlinted even after the scope above was
+  widened. The guard now sweeps root `.py` files too. `hate_crack.py`'s 32
+  `F821`s are an intentional consequence of its `globals().setdefault()`
+  re-export shim (ruff can't see the runtime copy from `hate_crack/main.py`),
+  so they're silenced explicitly via `[tool.ruff.lint.per-file-ignores]` rather
+  than left to accumulate unexplained.
+
+  Two more gaps in the guard itself: `test_both_lint_and_format_are_checked_
+  everywhere` only asserted a command count, so two `ruff check` lines and zero
+  `ruff format --check` lines would still pass -- it now checks the verbs
+  actually present. And `test_the_declared_scope_actually_passes` ran `python
+  -m ruff` instead of `uv run ruff`, which can resolve a different ruff
+  entirely than every real gate uses.
+
+## [2.22.1] - 2026-07-31
+
+### Fixed
+- **Release versions now reflect what is in the batch.** `auto-tag.yml` forced
+  `cz bump --increment MINOR` on every merge into `main`, so the second component
+  moved regardless of content and `main` could never produce an `X.Y.Z` with a
+  non-zero patch. Two bugfix merges took the project from 2.20.0 to 2.22.0 inside
+  an hour with no feature between them. The forcing was annotated as deliberate
+  (*"It is forced rather than inferred from commit messages… Do not add
+  breaking-change detection here"*); that annotation described the bug, not a
+  requirement.
+
+  The policy is now ordinary semver, derived from the commits since the last
+  release: any `feat` means the batch is heading for `X.(Y+1).0`, and a batch of
+  only fixes, docs and chores is heading for `X.Y.(Z+1)`. Applied to this
+  afternoon's history, the two releases would have been 2.20.1 and 2.21.0 rather
+  than 2.21.0 and 2.22.0.
+
+  `nightly-dev` now tags release candidates for whichever version the batch is
+  heading toward (`v2.20.1rc1`, `v2.20.1rc2`, …) and merging down to `main`
+  promotes that target to its final release. These are real PEP 440
+  pre-releases, so they order correctly at both ends --
+  `2.20.0 < 2.20.1rc1 < 2.20.1rc2 < 2.20.1 < 2.21.0rc1 < 2.21.0` -- which is the
+  property the two previous schemes each missed. Tagging `vX.Y.0-rc.N` aimed
+  candidates at the current cycle's version, so a candidate sorted below the
+  release it was heading for; replacing them with ordinary final versions dropped
+  the pre-release marker entirely, so anything ranking versions saw a nightly as
+  the latest release. Aiming one version forward fixes both.
+
+  The major component is still never bumped automatically: a `!` subject or a
+  `BREAKING CHANGE:` footer counts as a feature. An automatic major is one
+  mistyped subject line away from an irreversible published release, so it stays
+  an explicit human act.
+
+  The policy moved out of YAML into `tools/next_version.py`, shared by both
+  workflows and unit-tested in `tests/test_next_version.py` (43 tests, including
+  the ordering asserted against the real PEP 440 parser). The workflow steps that
+  consume it are themselves executed against real repositories in
+  `tests/test_release_versioning.py`, so a wrong *value* now fails a test -- the
+  previous tests stubbed `uvx` and could only prove the step parsed a fixed
+  string, never that the policy was right. Both workflows also now skip cleanly
+  when a batch is empty instead of tagging the empty string.
+
+## [2.22.0] - 2026-07-31
+
+### Added
+- **Startup now finishes a migration that a later schema change stranded.**
+  `write_env_from_legacy()` only runs when there is no `.env` yet -- once both
+  files exist, the bootstrap has nothing more to do. So a key that becomes
+  env-homed *after* a user's `.env` was written stays in their `config.json`,
+  where the loader ignores it and warns about it on every single start, and
+  nothing finishes the move except hand-editing JSON. `OLLAMA_HOST` did exactly
+  that. On a real install this meant twelve ignored keys, including
+  `hashview_api_key` and the whole `ollama*` group, silently inert.
+
+  `finish_stale_migration()` now copies those values into the `.env` and prunes
+  them from `config.json`, backing the original up first. It does so without
+  asking, matching `write_env_from_legacy()`, which also rewrites `config.json`
+  unprompted: a stranded key is already being ignored, so leaving it preserves
+  nothing but the warning -- and the warning *was* the prompt. Running
+  unprompted also means scheduled and piped runs get repaired, which is exactly
+  where a prompt would hang or be dismissed forever.
+
+  A key already set in the `.env` keeps that value -- the `.env` is the live
+  source, and copying the stale copy over it would silently revert a setting in
+  use -- but is still pruned, since it was being ignored. A wrongly-typed value
+  is neither copied nor pruned, matching the first-stage migration: it is the
+  only record of what the user meant. Notes name keys only, never values, since
+  several are secrets. Skipped entirely under `SKIP_INIT`, and any failure is
+  reported and swallowed rather than stopping startup.
+
+### Fixed
+- **A second migration no longer overwrites the first one's backup.** The prune
+  step wrote to a fixed `<config.json>.pre-split.bak`, which was safe while it
+  ran once per install at `.env` creation. Now that `finish_stale_migration()`
+  can run again -- any time a further key becomes env-homed -- a plain copy onto
+  that path silently replaced the only copy of the genuinely pre-split
+  `config.json`. Observed for real: a repair clobbered a `.pre-split.bak` written
+  weeks earlier. Backups now fall back to `.pre-split.bak.2`, `.3` and so on, so
+  a used name is never reused.
+
+## [2.21.0] - 2026-07-31
+
+### Fixed
+- **The update check no longer loops forever when one commit carries two release
+  tags.** The 2.20.0 release left commit `e37d568` tagged both `v2.19.15` and
+  `v2.20.0`, because `nightly-dev` and `main` pointed at the same commit and both
+  tag workflows fired on it. `git describe` breaks a same-commit tie by ref
+  iteration order, which is lexicographic, so the *lower* tag wins: setuptools-scm
+  reported 2.19.15 while the releases API reported 2.20.0. Every start offered an
+  upgrade, and accepting it re-fetched the same tags, landed on the same commit
+  and regenerated the same version, so no number of upgrades could clear it. It
+  affected every user who upgraded to 2.20.0.
+
+  `check_for_updates()` now treats "the latest release tag points at HEAD" as up
+  to date regardless of the version string, since being on the released commit is
+  the authoritative answer and a version derived from `describe` is not. Any
+  failure to establish that -- no checkout, no such tag locally, no git -- falls
+  back to the version comparison, so installs that are not git clones still get
+  the notice.
+
+  Covered by `tests/test_upgrade_convergence.py`, which runs real git so the
+  version really comes from a real `describe`. It asserts the property the
+  existing upgrade tests missed: they cover upgrade *mechanics*, but nothing
+  checked that upgrading is a *fixed point*. Both halves of this bug are
+  individually correct and only fail composed, so mechanics-only tests could not
+  have caught it.
+
+  The release pipeline can still produce the ambiguous state; that half is being
+  addressed separately in the versioning-policy work (#221).
+
+## [2.20.0] - 2026-07-31
+
+### Added
+- **Spoonman Attack now offers the current session's cracked passwords
+  (`<hash file>.out`) as a corpus source**, ahead of the free-form path prompt,
+  whenever that file exists and is non-empty. Spoonman derives basewords and
+  rules that exactly reconstruct its input corpus, so feeding it the target's
+  own recovered plaintexts derives rules describing that target's actual
+  conventions rather than a generic wordlist's. Mirrors the picker already
+  used by the LLM pattern mode (`_pick_pattern_source` / `ollama_attack`); the
+  shared menu logic is now factored into `_offer_cracked_or`. Sessions with no
+  `.out` yet see no menu at all -- behaviour is unchanged. (#219)
+
+- **A hashcat-backed correctness oracle for the mask generator, in
+  `tests/test_mask_oracle.py`.** Every other `_mask()` test compares against a
+  hand-written expected string, which only proves the function agrees with our
+  own belief about what `?l`/`?d`/`?s` mean. These tests ask hashcat instead:
+  hash a short synthetic plaintext, hand hashcat the mask `_mask()` produced,
+  and assert hashcat recovers the plaintext. A negative control asserts a
+  deliberately wrong mask is *not* cracked, so a potfile hit or an output-format
+  change cannot make the positive cases pass vacuously (`--potfile-disable` is
+  passed for the same reason). A third test pins that `?a` is exactly 95
+  candidates -- the printable-ASCII set -- which is the fact #230 rests on.
+  Skips when hashcat is absent, so it is effectively local-only: CI does not
+  install hashcat. This oracle is what found #230. (#230)
+
+
+- **`OLLAMA_NO_CLOUD`, an opt-in refusal of Ollama's cloud-hosted models.** Ollama
+  proxies a `-cloud`-tagged model (`gpt-oss:120b-cloud`, `deepseek-v3.1:671b-cloud`)
+  to ollama.com through the same local `/v1` endpoint a local model uses, so nothing
+  about the request shape signals that the prompt is leaving the host — and these
+  prompts carry recovered plaintexts, corpus statistics, and the client's name,
+  industry and location. The model name is the only thing checkable before the data
+  is already gone. Set `OLLAMA_NO_CLOUD=1` in `.env` and a cloud model is refused
+  before a client is built or a request assembled. It defaults to off, so anyone
+  deliberately using a cloud model is unaffected. The check lives at the three
+  `hate_crack.llm` entry points rather than at their call sites, and its `no_cloud`
+  parameter is keyword-only with no default, so a new call site has to state a
+  policy instead of silently inheriting a permissive one.
+
+- **A read-site guard for `.env`-homed keys, in `tests/test_config_json_example.py`.**
+  The existing no-inert-knobs test is driven by `config.json.example`, so it only ever
+  covered the `home="json"` keys: an integration key could be documented in
+  `.env.example`, warned about when placed in the wrong file, and read by nothing at
+  all. That gap is what let the `OLLAMA_HOST` bug below survive.
+
+- **`OLLAMA_HOST` is a real config key, so setting it in `.env` now works.** It
+  was read straight off `os.environ`, but the loader parses `.env` with
+  python-dotenv's `dotenv_values()` — which returns a mapping and deliberately
+  does *not* export into the process environment. An `OLLAMA_HOST` written into
+  `.env`, which is where every other Ollama setting lives and where `.env.example`
+  implies it belongs, was therefore reported as an unrecognized key, ignored, and
+  the run silently talked to `localhost:11434` instead of the operator's actual
+  Ollama box. It is now a `home="env"` schema key (`ollamaHost`, default
+  `localhost:11434`), read through `config_parser` like its neighbours, so it
+  resolves from `.env`, and a real exported `OLLAMA_HOST` still overrides that
+  for a single run via the environment layer. Both spellings — bare `host:port`
+  and a full URL with a scheme — keep working; normalization is unchanged.
+
+- **Two `pre-commit` guards that enforce the publication boundary and catch a
+  corrupt index, in `.github/scripts/`.** The boundary was documented but not
+  enforced: on 2026-07-30 a prek `pre-push` stash/restore cycle corrupted the
+  index and produced a commit that deleted 85,280 lines and staged gitignored
+  local-only files, and it reached this public remote before being force-pushed
+  away. `detect-private-key` was the only secret-scanning gate and does not look
+  at this, and CI has none at all.
+  `check-publication-boundary.sh` refuses any commit that adds or modifies a
+  local-only development path, reading the staged changeset from the index
+  rather than trusting `.gitignore` — `git add -f` past `.gitignore` is exactly
+  the failure mode. Deletions stay allowed so an accidentally tracked file can
+  still be removed. `check-mass-deletion.sh` aborts a commit deleting more than
+  50 tracked files (override: `HATE_CRACK_ALLOW_MASS_DELETE=1`); no commit in
+  the last 400 of this repo's history deleted more than one, so the threshold
+  cannot fire on real work. Both messages carry the actual recovery
+  (`git config core.bare false`, `git reset HEAD`), since the incident's
+  symptom is `fatal: this operation must be run in a work tree` and nothing on
+  disk is ever lost. They are `pre-commit`, not `pre-push`: by pre-push time the
+  bad commit already exists locally, and the pre-push stash is the thing that
+  corrupts the index. `tests/test_commit_guards.py` executes the scripts as a
+  real hook against throwaway repos and asserts on whether `git commit`
+  actually succeeded, rather than grepping `prek.toml` for hook ids. (#224)
+
+- **A defensive `hate_crack` name placeholder for PyPI, in
+  `packaging/pypi-placeholder/`.** The name was unclaimed on the index, which is
+  a name an operator could plausibly type into `pip install` or `uvx` expecting
+  this project — and a squatted package under it would land on a host holding
+  client hash material and API credentials. The placeholder is version `0.0.0`
+  with no dependencies, no console script, and nothing importable; its in-tree
+  PEP 517 backend raises from every wheel and metadata hook, so
+  `pip install hate-crack` aborts with source install instructions rather than
+  silently succeeding. Publishing is a `workflow_dispatch`-only workflow using
+  Trusted Publishing (OIDC, no stored token) that the release tag automation
+  cannot reach. Source install remains the only supported path. (#218)
+
+- **A tracked `.env.example` template, and a startup line naming the config
+  files actually loaded.** `.env.example` is generated from the configuration
+  schema (`uv run python -m hate_crack.config_writer`), so it cannot drift from
+  the key set hate_crack understands, and every credential key ships empty — it
+  is a committed file in a public repo. Startup now prints the resolved
+  `config.json` and `.env` paths, saying so inline when a file was created that
+  run. The search order prefers a repo checkout over `~/.hate_crack`, so a stray
+  `.env` in a checkout silently outranks the real one, and a `.env` in the
+  current working directory is never read at all; two lines of output make both
+  visible instead of leaving them to be rediscovered. Nothing is printed under
+  `HATE_CRACK_SKIP_INIT`. (#217)
+- **`--no-optimized-kernel` (alias `--no-optimize`) disables hashcat's `-O` for
+  an entire run.** Until now the only way to turn optimized kernels off was to
+  edit `optimizedKernelAttacks` in `config.json`, which persists and has to be
+  undone by hand — awkward when a single target has candidates past the length
+  ceiling `-O` imposes. The flag overrides the config list for every attack and
+  also strips a hand-written `-O` from `hcatTuning`, which is appended verbatim
+  to every invocation and would otherwise survive the flag and make it a lie.
+  Nothing is written back to `config.json`.
+
+### Changed
+
+- **The `config.json` -> `.env` migration now deletes the keys it copied, instead
+  of telling you to.** It used to leave `config.json` byte-identical on the
+  principle that the migration did not own that file, which meant the integration
+  keys stayed behind where the loader ignores them — and warns about every one of
+  them, on every subsequent run, until the user hand-edits JSON. That is a
+  permanent nag for a migration the tool could finish itself. The original file is
+  copied to `config.json.pre-split.bak` first, and the rewrite is atomic and
+  scoped: it drops only the keys named in the migration notes, preserves every
+  `home="json"` setting, keeps unrecognized keys the user was using as notes,
+  holds the original key order so the diff is reviewable, and carries the original
+  file's permissions over. A key whose value had the wrong type is deliberately
+  *not* deleted — the `.env` got the schema default rather than the user's value,
+  so removing it would destroy the only record of what they meant to set. If the
+  rewrite fails, the migration still succeeds and says so, with the manual
+  instruction as the fallback.
+
+- **Configuration is now split across two files, each owning a distinct set of
+  keys.** `config.json` keeps the 35 local settings (wordlists, masks, rules,
+  tuning, potfile, hashcat path, OMEN/PCFG/PRINCE limits, notification toggles,
+  update check) and gains the four persisted CLI preference defaults (`debug`,
+  `weakpass_min_rank`, `update_channel`, `restore_potfile_on_start`). A new
+  untracked `.env`, written at mode `0600`, owns the 12 third-party integration
+  keys: Hashview and Hashmob credentials, the Pushover token/user, the Ollama
+  settings, and `pipalPath`/`pipal_count`. `config.json` remains first-class and
+  is not deprecated. Each key has exactly one home; a key found in the other
+  file is ignored with a warning naming the file it belongs in, so there is no
+  cross-file precedence to reason about. `os.environ` still overrides any key,
+  which is what keeps the documented `HASHVIEW_URL` / `HASHVIEW_API_KEY`
+  overrides working. On first run both files are created; an existing
+  `config.json` holding integration keys has them copied into a new `.env`, and
+  hate_crack names the keys to delete from `config.json` rather than editing
+  that file itself. **Breaking** for anyone whose integration settings currently
+  live in `config.json`: those keys are no longer read from that file. The
+  migration is automatic and non-destructive — nothing is deleted, moved or
+  rewritten, and until you remove the stale keys yourself every run reminds you
+  which ones they are. Two of the promoted preference keys are namespaced as
+  `HATE_CRACK_DEBUG` and `HATE_CRACK_UPDATE_CHANNEL` on purpose: a bare `DEBUG=1`
+  exported by some unrelated tool must not switch on debug logging in a tool
+  that writes cracked plaintexts to disk. The other two keep their bare spellings
+  (`WEAKPASS_MIN_RANK`, `RESTORE_POTFILE_ON_START`). Adds a dependency on
+  `python-dotenv`. (#217)
+- **The cwd-relative potfile fallback is gone.** When `hcatPotfilePath` was
+  absent entirely, hate_crack used to fall back to `./hashcat.potfile` in the
+  directory it was launched from if `~/.hashcat/` did not exist. The
+  configuration schema now always supplies a value, so the potfile is
+  deterministically `~/.hashcat/hashcat.potfile` unless configured otherwise;
+  the directory is created on demand. Anyone who relied on picking up a potfile
+  from the current working directory should set `hcatPotfilePath` in
+  `config.json` or pass `--potfile-path`. (#217)
+- **Debug logs now default to `~/.hate_crack/hashcat_debug` instead of the
+  checkout-relative `./hashcat_debug`.** The old default resolved against
+  whatever directory hate_crack was launched from, which for anyone running it
+  out of a clone meant writing cracked plaintext into the repo, and which split
+  the logs across directories so the Rosetta picker showed a different set
+  depending on where the tool was started. `tests/test_repo_hygiene.py` fails
+  the build if the shipped default goes back to being relative.
+- **Rule-based attacks now request `--debug-mode 5` rather than mode 4.** Mode 5
+  appends the source wordlist to each line
+  (`baseword:rule:candidate:wordlist`), so a log from a multi-wordlist run
+  records which list is actually producing cracks. HashcatRosetta's parser
+  splits on the first two colons only, so it would silently glue that field onto
+  the candidate; `_strip_debug_source_field` normalises mode 5 lines back to the
+  mode 4 shape before parsing. Detection is per file, so mode 4 logs written
+  before this change are still read correctly alongside new ones. Without the
+  normalisation the unique-candidate rule metric double-counted a candidate
+  reached from two wordlists, misranking rules exactly when several logs were
+  mined together.
+
+### Removed
+
+- **The standalone `wordlist_optimizer.py` script.** Its per-length split and
+  dedupe is now `wordlist_optimize()` in `hate_crack/main.py`, reachable as
+  Wordlist Tools option 8 ("Optimize Wordlists"). Nothing in the tree referenced
+  the script — not the README, the tests, or packaging (`pyproject.toml` ships
+  `hate_crack*` only, so a root-level module was never installed) — and it had
+  drifted behind the in-tree version, which uses `tempfile` instead of the fixed
+  `/tmp/splitlen` paths the script would clobber when two runs overlapped, opens
+  wordlists in binary mode rather than raising `UnicodeDecodeError` on non-UTF-8
+  entries, and skips missing inputs instead of aborting.
+
+### Fixed
+- **A silently discarded `ImportError` that turned one missing HashcatRosetta
+  submodule into 20 unrelated assertion failures (#231).** `main.py` wrapped the
+  HashcatRosetta import in a bare `except ImportError` and threw the exception
+  away, leaving `DebugAnalyzer = None`. Because `hate_crack.main` is imported
+  once per pytest session, that `None` was sticky for the whole run, and
+  `tests/test_main_rosetta.py` failed on assertions like
+  `'<candidate>:wl.txt' == '<candidate>'` — a message that points at rule
+  parsing and says nothing about a missing submodule, which is why the cause was
+  misdiagnosed four times. The exception is now captured in
+  `ROSETTA_IMPORT_ERROR` and surfaced by `rosetta_unavailable_reason()`, which
+  both `rosetta_derive`'s `RuntimeError` and `analyze_rules`' error path use, so
+  a genuinely broken HashcatRosetta is distinguishable from a merely absent one.
+  The graceful degradation is unchanged: hate_crack still starts and runs every
+  non-Rosetta attack without the submodule. `tests/test_main_rosetta.py` now
+  reports the cause once instead of 20 times — it skips when the submodule is
+  not checked out (a legitimate worktree state, since `git worktree add` does
+  not populate submodules) and fails loudly when it is checked out but the
+  import failed anyway, which skipping would hide in CI. The guard deliberately
+  does not fire on a healthy checkout; `tests/test_main_rosetta_import_guard.py`
+  pins that, because a guard that skips too eagerly would silently delete 20
+  tests.
+- **Four Hashview tests that passed without ever making a request.**
+  `test_get_hashfiles_by_type_success`, `test_get_customer_hashfiles`,
+  `test_download_left_hashes` and `test_download_wordlist` each took the `api`
+  fixture — which holds `patch("requests.Session")` open for the whole test body
+  — and then built a second client inside that body from `config.json`. That
+  client's session was a `MagicMock`, so no HTTP happened and the assertions held
+  against the mock. `get_hashfiles_by_type`'s own `except Exception: return []`
+  made `assert isinstance(result, list)` true for a call that never left the
+  process. Each is now split into a mocked test and a `*_live` test built through
+  `_live_api()` (added in #223), which takes credentials from the environment
+  only and asserts the session is a real `requests.Session`. The
+  "real if possible, else mock" shape is gone: it was what hid this, because a
+  green dot never said which branch ran. `test_download_wordlist_live` uploads its
+  own synthetic wordlist and downloads it back, so it cannot skip for lack of
+  seeded data. The `_get_hashview_config()` helper is deleted with its last
+  caller — it read `config.json`, and was therefore a path by which a plain
+  `pytest` run could reach a developer's real Hashview. (#228)
+
+- **A host-port conflict starting the local Hashview test stack is now named
+  instead of surfacing as `exit status 1`.** `docker compose up` is captured, and
+  a `Bind for ...: port is already allocated` failure reports the port, the
+  `docker ps --filter publish=<port>` command to find the container holding it,
+  and the option of pointing the live tests at that instance via
+  `HASHVIEW_URL`/`HASHVIEW_API_KEY` instead. hashview's compose file publishes
+  fixed host ports and `HASHVIEW_LOCAL_PORT` only moves the app's `SERVER_NAME`,
+  so a separate long-running hashview project silently owns them and no
+  environment variable routes around it; reported opaquely, the live tests skipped
+  for a reason that read like docker being broken. Other `up` failures now
+  surface their last output line rather than the exception repr. (#225)
+
+
+- **Mask statistics claimed coverage hashcat cannot deliver for non-ASCII
+  passwords (#230).** `corpus_stats._mask()` mapped any non-ASCII character to
+  `?s`, but every hashcat built-in charset is ASCII-only (`?a` is exactly 95
+  candidates), and worse, hashcat masks are *byte*-oriented while `_mask()` is
+  *character*-oriented — `ab²x` is four characters but five UTF-8 bytes, so no
+  four-position mask can describe it under any charset. The reported masks were
+  therefore wrong in both charset and length, and `format_summary()` fed them to
+  the LLM as if they were usable. Non-ASCII passwords are now excluded from the
+  mask counters, and the exclusion is stated on the Masks line, e.g.
+  `Masks (over 9,412 of 9,533; 121 excluded as non-ASCII): ...`. Mask shares are
+  divided by the mask-eligible count rather than the corpus total, so a corpus
+  that is 30% non-ASCII no longer understates every mask by that fraction. Every
+  other statistic — lengths, casing, basewords, suffixes, symbols, years — still
+  counts the excluded passwords exactly as before, and for an all-ASCII corpus
+  the rendered summary is byte-identical to the previous release. The hashcat
+  oracle added under this issue now also proves that every mask `summarize()`
+  reports for a mixed corpus is crackable by real hashcat.
+
+- **A Unicode digit (e.g. the superscript `²`) in a wordlist crashed corpus
+  analysis for the LLM attack modes (#229).** `corpus_stats._years` guarded an
+  `int()` call with `str.isdigit()`, which is `True` for Unicode digits that
+  `int()` rejects, raising `ValueError` mid-analysis (silently swallowed by a
+  broad handler in `main.py`, so the symptom looked like a config error rather
+  than a parsing bug). The same wrong notion of "digit" also let `_mask` map
+  such characters to hashcat's `?d` — a mask claiming a candidate hashcat's
+  `?d` charset (ASCII `0-9`) cannot actually generate — and let the trailing
+  digit-suffix stats count them. All three sites now share one
+  `_is_ascii_digit` predicate. `str.isdecimal()` alone would have fixed the
+  crash but not the mask/suffix correctness, since it is also `True` for
+  non-ASCII decimal digits (e.g. Arabic-Indic `١٢٣`) that hashcat's `?d` still
+  cannot match; this predicate is ASCII-only for all three sites.
+- **A dangling `.env` or `config.json` symlink was read as "no config
+  present", so hate_crack silently ran on schema defaults (#227).** Config
+  discovery and both file layers gated on `os.path.isfile()`, which is `False`
+  for a symlink whose target is missing — the wrong wordlists directory and the
+  wrong potfile path, with nothing printed to say so. All four gates now route
+  such a path to the existing `ConfigFileUnreadableError` diagnostic, whose
+  dangling-symlink branch was previously unreachable through discovery, and
+  startup exits 1 naming the link. `os.path.isfile()` remains the positive
+  test, so a *directory* called `.env` is still ignored rather than read, and a
+  **valid** symlink to a real config file keeps working — sharing one config
+  across several checkouts that way is a supported setup.
+- **First run printed the config file paths twice, in different words
+  (#227).** The bootstrap's own "Initializing / Config source / Config
+  destination" block sat directly above the two `[*] config.json:` /
+  `[*] .env:` lines that already name the resolved paths. The bootstrap is now
+  silent about paths and passes what only it knew — the template or migration
+  source — to those two lines, which report it inline (e.g.
+  `(created this run, from config.json.example)`). The per-key migration notes
+  telling the user which settings to delete from `config.json` are unchanged.
+- **No test covered a plain `str` config value with surrounding whitespace
+  surviving a `.env` round trip (#227).** `config_writer._needs_quoting` is
+  type-agnostic and the `charset` keys exercised it only because their values
+  always contain a space. Leading, trailing, both, and interior-double-space
+  values now round-trip through a real file read back with `dotenv_values()`
+  and through the loader.
+- **Three Hashview tests claimed to hit the real API "if possible" but never
+  did, and could not fail even when their assertions did (#223).** The `api`
+  fixture holds `patch("requests.Session")` open for the whole test body, so a
+  client built inside such a test got a `MagicMock` session and never reached
+  the server; the surrounding `except Exception` then laundered the resulting
+  `AssertionError` into a `pytest.skip` that read like an authorization problem,
+  which is what hid the mock leak. `test_upload_cracked_hashes_success`,
+  `test_create_customer_success`, and `test_create_job_with_new_customer` are
+  now each split into a mocked test and a `*_live` test that never requests the
+  mocked fixture, gated on `HASHVIEW_TEST_REAL=1` plus `HASHVIEW_URL` /
+  `HASHVIEW_API_KEY` (env only, so a plain run cannot silently reach a real
+  Hashview through `config.json`). The live path asserts up front that its
+  session is a genuine `requests.Session` and not a `Mock`, which is the
+  regression detector for the leak, and only `requests.RequestException` can
+  skip — assertion failures propagate. Verified against the local docker stack:
+  all three now execute, and each reports FAILED (not SKIPPED) under a
+  deliberately broken assertion.
+- **Test fixtures used real plaintext passwords as example values in a public
+  repository.** Every cracked-pair, hashfile, and format-detection fixture in
+  `tests/test_hashview.py` now derives its digests from obviously-synthetic
+  plaintexts via the client's own `_digest_for_type`, so hash/plaintext pairs
+  stay valid under upload validation (including for whichever hash mode the
+  live stack seeds) without embedding known passwords or their digests.
+- **`hcatHashFile`, `hcatHashFileOrig`, and `hcatHashType` did not exist until
+  `main()` assigned them, so 53 test call sites needed
+  `monkeypatch.setattr(..., raising=False)` — a flag that silently creates the
+  attribute on a typo instead of failing the test.** They now have
+  module-level defaults matching the types `main()` assigns
+  (`hcatHashFile = ""`, `hcatHashFileOrig = None`, `hcatHashType = ""`),
+  restoring the typo protection at all 53 sites. That exposed a latent
+  clobber in the `hate_crack.py` CLI proxy: `_sync_globals_to_main()` only
+  pushed a name back to `hate_crack.main` `if name in globals()`, so these
+  three were skipped while absent — once present, the proxy's stale
+  import-time copy would overwrite whatever `main()` had legitimately set,
+  breaking option 95 (Analyze hashes with Pipal) for anyone reaching it
+  through the shim. `_sync_globals_to_main()` now snapshots the proxy's
+  import-time values and only pushes a name when its current value differs
+  from that snapshot, which also closes the same latent clobber for
+  `pipalPath`, `debug_mode`, `pipal_count`, and `hcatUsernamePrefix` (#213).
+- **Five wordlist call sites decided whether to gunzip a file by checking the
+  filename for a `.gz` suffix, so a gzip body under a plain name reached an
+  external hashcat-utils binary as raw compressed bytes.** hate_crack
+  downloads wordlists as gzip and names them from a server-supplied
+  `Content-Disposition` header, and Hashmob/Weakpass ship gzip too, so a
+  compressed body routinely lands under a `.txt` name. The binary does not
+  error on that — it runs to completion and produces meaningless
+  candidates, no `UnicodeDecodeError`, no non-zero exit. The correct
+  magic-byte check already existed for `hcatNgramX`; it is now the single
+  shared `hate_crack.plaintext.is_gzipped`, used by `hcatCombipow` and
+  `combipow_crack`'s pre-flight line count. `hcatMarkovTrain`, `hcatPrince`,
+  and `hcatPermute` route through `_wordlist_path` instead — decompressing
+  to a real temp file rather than opening a `gzip.GzipFile` handle, because
+  `subprocess.Popen(stdin=...)` resolves that handle through `fileno()`,
+  which for `GzipFile` is the fd of the *underlying compressed* file. A
+  `GzipFile` passed straight to `Popen` therefore feeds the child raw gzip
+  bytes even though reading it from Python decompresses correctly — the gap
+  the original fix for these three sites missed. `_open_wordlist` remains
+  correct for its one remaining caller, which only reads the handle in
+  Python, and its docstring now warns against ever handing it to
+  `subprocess` (#215).
+- **The Spoonman attack and the LLM pattern modes derived garbage basewords
+  and rules from a gzipped corpus, with no error.** Both readers opened the
+  corpus with `encoding="latin-1"`, under which every byte 0x00-0xFF decodes
+  to a valid character, so a gzip stream decodes cleanly into mojibake instead
+  of raising `UnicodeDecodeError` — there was nothing to alert anyone that the
+  input was wrong. Gzipped corpora are the normal case here, not the
+  exception: hate_crack downloads wordlists as gzip, and Hashmob and Weakpass
+  ship them that way too. `hcatSpoonman` and the LLM corpus summarizer
+  (`_corpus_context`) now decompress through the same `_wordlist_path` helper
+  `hcatNgramX` already used, and `rulegen.generate()` /
+  `corpus_stats.summarize()` each gained a defensive `ValueError` on a
+  gzipped path as a backstop against a caller that forgets to decompress.
+  Spoonman's staleness check still compares against the original corpus
+  path rather than the decompressed temp file, so its basewords/rules cache
+  keeps working across runs (#214).
+- **Cracked plaintexts on the Hashview found/upload paths are no longer
+  silently rewritten (issue #216).** Three reads of `hash:plaintext` data used
+  `errors="ignore"`, which drops an undecodable byte instead of raising: a
+  password holding a Latin-1 accent, a Windows-1252 quote, or any byte hashcat
+  emitted raw decoded to a *different* password with no error, and the potfile
+  append persisted that altered value so a later `--show` reported a plaintext
+  that does not hash to the stored hash. All three now read bytes and wrap a
+  non-UTF-8 plaintext in `$HEX[...]` via the new
+  `hate_crack.plaintext.encode_hex_wrapper`, matching what hashcat itself
+  writes and what `_wire_field_bytes` already understood. A line whose *hash*
+  field is undecodable is reported to the operator rather than dropped
+  silently.
+- **Bumped the HashcatRosetta submodule from v0.2.0 to v0.4.0, which parses
+  `--debug-mode 5` natively.** The pinned v0.2.0 predated mode 5 support: its
+  parser split on the first two colons only, so the trailing wordlist field was
+  silently glued onto the candidate rather than rejected. hate_crack worked
+  around that by stripping the field before parsing, which fixed the corruption
+  but threw the wordlist away. v0.4.0 returns it as its own `wordlist` key, so
+  the workaround is gone and the attribution survives -- a log can now say which
+  wordlist actually produced each crack. Mode 4 logs written before the switch
+  still parse.
+
+- **A POT file lookup that came back empty no longer wipes the cracked output
+  file.** `check_potfile()` rewrote `<hashfile>.out` from `hashcat --show`
+  unconditionally, so any run where `--show` produced nothing truncated it to
+  zero bytes — cracks captured via `-o` only, an empty or stale
+  `hcatPotfilePath`, a `--username` parse mismatch, or a hashcat failure that was
+  invisible because stderr was discarded. On the pwdump path `cleanup()` reaches
+  this before the merged file exists, so that was the only surviving copy.
+  `_run_hashcat_show` now preserves a populated output file when it has nothing
+  to write, refuses to touch it on a non-zero hashcat exit and reports the error,
+  and replaces content atomically. The deliberate rebuild (`--restore-potfile`
+  and menu option 93) still overwrites, but only after confirming (#195).
+- **Cracked-plaintext artifacts are no longer stageable in a fresh clone.**
+  `.out`, `.passwords`, `.working`, `.combined`, `.nt`, `.lm`, `.cracked`,
+  `.xlsx`, `hashcat.potfile` and the per-attack scratch directories were ignored
+  only by `.git/info/exclude`, which does not clone, or by nothing at all. They
+  are now in the tracked `.gitignore` and pinned by `tests/test_repo_hygiene.py`.
+- **hashcat debug logs are no longer committable, and one that had been
+  committed is now untracked.** `_add_debug_mode_for_rules` appends
+  `--debug-mode 4 --debug-file` to every rule-based attack unconditionally, and
+  each line of the resulting log pairs a rule with the plaintext it cracked. The
+  default `hcatDebugLogPath` was the relative `./hashcat_debug` at the time, so
+  any session launched from a checkout wrote them into the working tree of a
+  public repo; the default is now absolute, as described under Changed above.
+  Nothing had been ignoring them except a `*.log` line in `.git/info/exclude`,
+  which is local-only and does not clone, and one such log was already tracked
+  on `main`. It was zero bytes, so no plaintext was published. `hashcat_debug/`
+  and `hashcat_debug*.log` are now in the tracked `.gitignore`, the tracked file
+  is removed from the index, and `tests/test_repo_hygiene.py` fails the build if
+  either protection regresses.
+- **The Rosetta Attack no longer lists empty debug logs.** hashcat creates the
+  debug file when the attack starts but only writes on a crack, so a rule-based
+  run that cracks nothing leaves a zero-byte log. `rosetta_debug_logs()`
+  returned those alongside real ones; since the picker shows only the newest 20
+  by mtime, dead files could crowd out logs that still had something to mine.
+- **Pipal analysis (option 95) ran the pwdump-only merge on any NTLM run.** The
+  guard tested the hash type but not `pwdump_format`, unlike the identical guard
+  in `cleanup()`, so a plain NTLM list took a code path meant for pwdump files —
+  which used to truncate the cracked output and produce a report reading
+  `Total entries = 0`. Pipal now also says so plainly when there are no cracked
+  passwords to analyse, instead of emitting a zeroed report (#196).
+- **Excel export (option 96) had the same missing guard as Pipal analysis.** It
+  ran the pwdump-only merge for any NTLM hash type, so a plain hash list took a
+  path that used to truncate the cracked output, and then produced an empty
+  spreadsheet because the pwdump-shaped rows it looks for were not there. All
+  three callers of the merge now guard identically, and a test enforces that a
+  fourth cannot be added without the guard (#196).
+- **Two shipped docstrings cited `docs/superpowers/specs/...` design specs.**
+  `docs/superpowers/` is a gitignored local development aid purged from git
+  history on 2026-07-25, so the citations in `hate_crack/noninteractive.py` and
+  `tests/e2e/noninteractive_harness.py` pointed an outside contributor at a
+  path that does not exist in their clone. Both docstrings now keep the prose
+  that actually helps a reader and drop the dead pointer, and
+  `tests/test_repo_hygiene.py` gained a guard that fails the build if any
+  tracked file cites `CLAUDE.md`, `.claude/`, `docs/plans/`, or
+  `docs/superpowers/` again, with `CHANGELOG.md` and
+  `tests/test_upgrade_real_git.py` as the only exemptions (#212).
+### Changed
+
+- **Release versioning is now rolling, and driven by [commitizen](https://commitizen-tools.github.io/commitizen/)
+  instead of hand-rolled bash.** `main` is stable and always `X.Y.0`; merging
+  `nightly-dev` down cuts the release as a minor bump. `nightly-dev` consumes the
+  patch numbers above it — `X.Y.1`, `X.Y.2`, … — one per validated push. So
+  stable `2.19.0` is followed by nightlies `2.19.1`, `2.19.2`, and the next merge
+  to `main` cuts `2.20.0`.
+
+  This replaces the `-rc.N` pre-release scheme. Both tagging workflows previously
+  duplicated the same version arithmetic in shell (`cut -d.` to split the
+  version, `$((minor + 1))` to bump it, a `sed`/`sort -n` pipeline to advance the
+  rc counter); all of it is deleted. `cz bump --increment {MINOR,PATCH}` does the
+  arithmetic, configured under `[tool.commitizen]` with `version_provider = "scm"`
+  so the version is read from git tags and there is no version string in a file
+  and no version-bump commit.
+
+  Because nightly tags are now ordinary release tags, the `setuptools-scm`
+  workaround that the old scheme existed for is retired: `-rc` was chosen only
+  because `setuptools-scm` rejects tags ending in `.devN` for `N > 0`, which
+  ruled out an incrementing `-dev.N` counter.
+
+- **A merge into `main` now always cuts a release**, including a docs- or
+  chore-only one. The old workflow skipped tagging when it found no
+  `feat`/`fix`/`perf` commits; a merge to `main` is an explicit release event, so
+  that early exit is gone. `nightly-dev` already tagged unconditionally, so that
+  every validated nightly commit stays addressable.
+
+- **Transition.** With `v2.18.0` as the baseline on `main`, the first release
+  under the new scheme is `v2.19.0`, and `nightly-dev` then rolls `v2.19.1`,
+  `v2.19.2`, … Both are monotonic against the highest surviving tag,
+  `v2.19.0-rc.11` (`2.19.0rc11 < 2.19.0 < 2.19.1`). The three `v3.0.0-rc.*` tags
+  were deleted from the remote as part of this transition, as a deliberate human
+  decision — they advertised a `3.0.0` release that is not being cut. All other
+  `-rc.N` tags remain as history and must not be deleted.
+
+### Removed
+
+- **Automatic major version bumps.** A `type!:` subject or a `BREAKING CHANGE:`
+  footer no longer bumps the major version by itself, because the increment is
+  now forced per branch rather than inferred from commit messages. This is
+  deliberate — reintroducing breaking-change detection would reintroduce the
+  hand-rolled version decisioning this change removes. A major release is instead
+  an explicit human act: run `cz bump --increment MAJOR` and push the resulting
+  tag.
+
+  Note that four commits already on `nightly-dev` are marked breaking and would
+  have cut a major release under the old rules — three `feat(config)!:` and one
+  `refactor(config)!:`, all part of the config-file split. Under the new rules
+  they do not; they ship inside the next minor release. That is the intended
+  trade-off, recorded here so it is a decision rather than a surprise.
+
+### Notes
+
+- **Merge `main` down into `nightly-dev` immediately after this release.** Until
+  you do, every validated `nightly-dev` push fails its tagging job with
+  `[NO_VERSION_SPECIFIED]` (exit 4), because `nightly-dev`'s `pyproject.toml` has
+  no `[tool.commitizen]` section yet — the config arrives with that merge. The
+  failure is loud and cannot mistag anything, which is the right failure mode, but
+  commitizen's error text says nothing about the cause. Expect a conflict in
+  `pyproject.toml` during the merge.
+- One transition hazard, on the record: in a hypothetical state where the
+  commitizen config had reached `nightly-dev` but the new `v2.19.0` tag was not
+  yet reachable from it, the nightly job would compute `v2.19.0` — the same tag
+  `main` cuts — and the idempotency guard would then quietly leave that nightly
+  commit untagged. In practice this cannot happen, because the config and the tag
+  arrive in the same merge-down commit. It is noted because it is the one way the
+  two branches could contend for a version number.
+- Nightly tags are no longer PEP 440 pre-releases, so any tool that resolves
+  "the latest version" from raw version numbers will now treat a nightly as
+  latest. hate_crack's own startup update check is unaffected: it reads GitHub's
+  "latest release" endpoint and nightly builds publish no GitHub release. The
+  package is not published to PyPI (only a defensive name placeholder exists), so
+  nothing installs from an index today, but this is a real property of the scheme
+  rather than an oversight.
+- `release.yml` is unchanged and remains the path for tags pushed by a human;
+  tags pushed with `GITHUB_TOKEN` do not dispatch workflow events, so it never
+  fires for the bot-pushed tags above.
+
+## [2.18.0] - 2026-07-29
+
+### Added
+
+- **Rosetta Attack (main menu option 23)** — mines hashcat `--debug-mode 4`
+  logs for the basewords and rules that already cracked something, then runs
+  their full cross product. hate_crack already writes these logs for every
+  rule-based attack, so the input accumulates in `hcatDebugLogPath` without any
+  setup; a mode 4 log contains only successful candidates, which makes both
+  halves known-productive against the target population. The recorded pairs
+  themselves are spent, but a rule that worked on one baseword has usually
+  never been tried against the others. Rules can be ranked by application
+  frequency, by baseword spread, or by unique candidates generated, and both
+  the rule and baseword counts are capped interactively (defaults: top 100
+  rules, all basewords). Derived files land in `<hash file>.rosetta/` and are
+  removed by the existing temp-file cleanup. Powered by HashcatRosetta, the
+  same submodule behind the rule opcode analyzer.
+- **The Spoonman Attack's rule derivation now bounds its own memory instead of
+  being OOM-killed on a very large corpus.** `rulegen.generate()` held every
+  distinct baseword and every distinct rule in a `Counter` until the whole
+  corpus had been read, and wrote nothing before that point — so a corpus big
+  enough to exhaust RAM lost the entire multi-hour pass with no output at all.
+  A measured run against a 31 GB corpus reached 14.1 GB resident at 11% of the
+  file with the growth rate still climbing. Each counter is now capped at a new
+  `max_unique` keyword argument (default `rulegen.MAX_UNIQUE_KEYS`,
+  20,000,000 keys, about 1.6 GB per counter at a measured 80 bytes per key);
+  once a counter passes the cap its lowest-frequency keys are discarded while
+  reading. Pass `max_unique=None` for the previous unbounded behaviour. When
+  pruning fires the run reports it: new `pruned`, `pruned_basewords` and
+  `pruned_rules` keys in the returned dict, a section in `coverage.txt`, and a
+  console warning naming the limit — because the output then reconstructs only
+  the retained keys rather than 100% of the corpus, and the coverage
+  percentages are relative to those. A password needs both its baseword and
+  its rule to survive and the two counters are pruned independently, so the
+  report gives the range of passwords still reconstructable rather than a
+  number it cannot know. A corpus that never reaches the cap produces
+  byte-identical output to before.
+
+- **Spoonman Attack now offers a top-50% and top-75% coverage tier, and top 50%
+  is listed first as the recommended choice.** Rule-set coverage against a large corpus is extremely
+  long-tailed: on a 98.2M-password sample, 50% coverage needed 4,120 rules
+  while 95% needed 16,119,661 and 100% needed 21,029,696. The old menu only
+  offered the full set, top 99%, or top 95% — all three sat past the knee of
+  that curve, so every option produced a rule file with tens of millions of
+  entries on a large corpus. The menu now reads top 50% (smallest, most
+  productive rules) / top 75% / top 95% / top 99% / full set, and
+  `rulegen.generate()`'s `cover` default changed from `(95, 99)` to
+  `(50, 75, 95, 99)` to match.
+
+- **A test that every documented config key is actually read.** The existing
+  guard pins the key set, so a key added to `config.json.example` and to the
+  expected-key list in one commit passes it while being read by nothing —
+  which is how three dead keys shipped. The new test traces each key to the
+  global it loads into and then to a read site anywhere in the package,
+  including consumption through the attack handlers' `ctx` proxy.
+
+
+- **`optimizedKernelAttacks` now works for the N-gram, LLM, OMEN, and LM-to-NT
+  attacks, and is documented.** All four built their hashcat command without
+  ever consulting the setting, so listing them had no effect. They honour it
+  now, but stay out of the default set — each feeds candidates that can exceed
+  the length ceiling `-O` imposes, so enabling it is opt-in rather than a
+  silent keyspace reduction for anyone already running them. An unrecognized
+  entry in the list is now reported at startup instead of being ignored, and
+  README documents the flag's trade-off along with the delegation rule that
+  makes PRINCE-LING follow `hcatPrince` and Spoonman follow
+  `hcatQuickDictionary`.
+
+- **The Ad-hoc Mask Attack (option 14) now accepts a mask file.** The attack
+  opens with a choice between typing a mask and selecting a `.hcmask` file, the
+  latter with tab completion rooted at the bundled `masks/` directory. Mask
+  files carry their own charset definitions, so the `-1` through `-4` prompts are
+  skipped on that path. This makes the hundreds of masks already shipped in
+  `masks/` usable without retyping them, and lets a generated or hand-written
+  mask list run without a dedicated menu entry.
+
+
+- **On-demand regeneration of `<hashfile>.out` from the POT file.** New main
+  menu option **93** ("Regenerate .out from POT file") and a matching
+  `--restore-potfile` startup flag. `check_potfile()` already rebuilt the
+  output file from `hashcat --show`, but it was only reachable as a side effect
+  of `combine_ntlm_output()`, and the startup POT lookup ran only when `.out`
+  did not already exist — so a truncated or lost output file could not be
+  restored without deleting it and restarting. The menu path prints the
+  existing cracked-hash count and asks for confirmation before overwriting
+  (auto-confirming when stdin is not a TTY); the flag is treated as an explicit
+  request and skips the prompt.
+- **LLM Pattern Rules mode** (option 4 in the LLM Attack submenu). Mirrors the
+  Spoonman Attack's shape — a baseword list run through hashcat rules — but
+  infers the basewords rather than extracting them. Spoonman's `rulegen` is
+  lossless and therefore literal: it can only emit cores that already appear in
+  its corpus. This mode instead asks the local model to identify the word
+  families behind a sample (company and products, site names, local teams,
+  seasons, mascots) and enumerate members the sample does not contain, then runs
+  those basewords against rule file(s) chosen from the rules directory. The
+  pattern source is either the session's cracked passwords or a sample wordlist;
+  model output is normalized to lowercase letters only, since the rules supply
+  case, digits, and punctuation. Basewords land in `<hashfile>.llm_patterns`,
+  which `cleanup()` removes on exit.
+- Real-git coverage for the upgrade path (`tests/test_upgrade_real_git.py`).
+  The existing tests mock `subprocess.run` wholesale, so they only assert which
+  command strings get built — a mocked `git pull` always succeeds, which is why
+  the two `--update` bugs listed under Fixed reached users with the suite green.
+  The new tests construct a remote and a clone whose history has been rewritten
+  out from under it, then run the real git commands, and additionally assert
+  that `_run_upgrade()` constructs no `pull` at all.
+
+### Changed
+
+
+- **LLM Pattern Rules (LLM submenu option 4) now generates its own rule file
+  instead of prompting for one.** The mode was named for rules it never wrote:
+  it inferred basewords and then asked the operator to pick a stock rule file to
+  mutate them with, which encodes the internet's password habits rather than the
+  target organization's — the one thing a model round trip over that
+  organization's own corpus is there to capture. It now makes a second request
+  from the same corpus statistics for hashcat rules describing how these users
+  decorate a word, and runs the inferred basewords against the inferred rules.
+  This completes the parallel with the Spoonman attack, which derives both sides
+  from one corpus; the difference is that Spoonman is exact and therefore
+  bounded to transformations already present, while this generalizes past them.
+
+  Generated rules are validated against hashcat's op set, per-argument types,
+  and 31-function ceiling before the file is written (new
+  `rulegen.validate_rule`). Screening is not optional: hashcat drops an invalid
+  rule *silently* when the file also holds valid ones, so an unchecked line
+  would surface as missing coverage rather than an error. The op table was
+  established by testing a hashcat binary across 953 rule cases rather than
+  from the rule documentation, which lists ops (the memory and reject-plain
+  families) that hashcat then refuses to run.
+
+  Because local-model yield here varies widely between runs, a first answer
+  under 25 valid rules is asked again once and the two rounds are merged and
+  deduped; a corpus that yields no valid rules at all falls back to running the
+  basewords unmutated instead of discarding the run's expensive half.
+
+  Scratch output moves from the `<hashfile>.llm_patterns` file to a
+  `<hashfile>.llm_patterns/` directory holding `basewords.txt` and
+  `rules.rule`, mirroring `.spoonman/`. Cleanup removes either shape, so
+  scratch left by an earlier version is still cleared.
+
+
+- **Hash-prefix stripping is now based on digest shape rather than the first
+  colon.** New module `hate_crack/plaintext.py` holds the single implementation
+  shared by the LLM read path, `corpus_stats`, and `rulegen`. A leading field is
+  dropped only when it has the shape of a hash — a hex digest at a known length,
+  or a crypt-style `$id$` string — so `hash:salt:plain` is handled, a plaintext
+  containing colons survives intact, and a wordlist entry that merely contains a
+  colon (a URL, a ratio, a time of day) is no longer truncated. Previously the
+  LLM modes split unconditionally on the first colon.
+
+- **The LLM modes now describe the whole corpus statistically instead of pasting
+  in a sample of it.** New module `hate_crack/corpus_stats.py` aggregates every
+  password in the source file — baseword shares (reusing `rulegen.derive`, the
+  same extraction the Spoonman attack uses), masks, casing, lengths, trailing
+  digits and symbols, and years — and the prompt carries that summary. Output is
+  bounded, so a 120,000-password dump costs roughly the prompt space a 500-line
+  sample did. Literal plaintexts are still included when the whole corpus fits
+  under `ollamaMaxSampleLines`.
+
+  An evenly-spaced sample conveyed no frequency information, so the model could
+  not tell a baseword used by 8% of an organization from one used by a single
+  person. It also did not reliably fit: at the old `ollamaNumCtx` of 2048, 500
+  plaintexts (~2,000–3,500 tokens) plus the system prompt and response exceeded
+  the context window, and Ollama silently truncated part of the sample.
+  `ollamaMaxSampleLines` keeps its meaning as the "small enough to send
+  verbatim" threshold.
+
+- **`ollamaNumCtx` default raised from 2048 to 8192**, so the prompt fits with
+  headroom.
+
+- **The LLM modes now warn when the chosen corpus looks like an uncracked hash
+  dump.** A raw NTDS dump (`user:rid:lm:nt:::`) and a cracked-output file sit in
+  the same working directory with similar names, and the dump produces confident
+  nonsense rather than an error: splitting on the first colon yields the rest of
+  the hash line, so the statistics describe hex strings. Validated against real
+  files — 99% of lines flagged in a 40,765-line NTDS dump, zero flagged in two
+  genuine 22k/41k-line cracked-output files.
+
+- **Digit-only basewords are excluded from the baseword list.** `rulegen.derive`
+  falls back to the password itself when it holds no letters, so a PIN-heavy
+  corpus filled the list with digit strings and crowded out the word families it
+  exists to surface. The digit-only share is still reported via the casing and
+  mask lines.
+
+- **`$HEX[...]` plaintexts are now decoded** when reading a corpus for the LLM
+  modes. hashcat wraps any plaintext holding non-ASCII bytes or the output
+  separator; read literally, the wrapper polluted baseword and mask statistics
+  with the letters of `$HEX[` and the corpus's hex digits. Malformed wrappers
+  pass through unchanged. Note this fixes the LLM read path only — the Spoonman
+  attack's `rulegen` reads corpora directly and is unaffected.
+
+### Removed
+
+
+- **`omenTrainingList` is gone from `config.json.example`.** It was loaded and
+  path-normalized but never read: the OMEN attack always shows the wordlist
+  picker, which builds its list from the wordlists directory. Setting it had no
+  effect. Pick your training corpus in the attack's prompt instead.
+
+- **Three config keys that had no effect are gone from `config.json.example`.**
+  `hcatCombinator3Wordlist` and `hcatCombinatorXWordlist` were loaded and
+  path-normalized but never read: since the combinator attacks were merged into
+  one menu entry, the single handler takes its defaults from
+  `hcatCombinationWordlist` and picks the 2-way, 3-way, or N-way path from how
+  many entries that list has. `hcatPrinceLing` was listed in
+  `optimizedKernelAttacks` but never checked, because PRINCE-LING delegates to
+  the PRINCE attack, which tests its own name — use `hcatPrince` to control
+  `-O` for both.
+
+- **`combinator3_crack`, `combinatorX_crack`, and `combinator_3plus_crack` are
+  gone from `attacks.py`, along with their `main.py` proxies.** They were
+  delegation shims left behind when the combinator attacks merged into one
+  handler; neither menu mapping nor any test referenced them, so they were
+  unreachable dead code.
+
+### Fixed
+
+- **Exiting a `-m 1000` session could crash instead of cleaning up.**
+  `pwdump_format` was assigned only inside `main()`'s format-detection block, so
+  any run that reached `cleanup()` without executing that block raised
+  `NameError: name 'pwdump_format' is not defined` — at the end of the session,
+  after the cracking work was done, and skipping the rest of the cleanup. It now
+  has a module-level default of `False`.
+- **Analysing or exporting a plain hash list destroyed every cracked password.**
+  `combine_ntlm_output()` merges cracked passwords back onto pwdump lines, reading
+  `<hashfile>.out` and writing `<original>.out`. For a hash file that is not pwdump
+  format those are the same path, and the function opened its own input with mode
+  `w+`, truncating it, then matched against lines that no longer existed — so a
+  populated `.out` became 0 bytes. It now returns early when there is nothing to
+  merge onto, and builds the merged file beside its destination and moves it into
+  place only once it has content, so a run that matches nothing can no longer
+  replace a good result with an empty one.
+- **`coverage.txt` now reports the rule count for 75% coverage.** Its milestone
+  list ran 50/80/90/95/99/100, so an operator picking the new top-75% tier
+  could not look its cost up in the one file meant to answer that question.
+
+- **The LLM Pattern Rules attack hid why it had no rules to run.** When every
+  rule the model returned was rejected as invalid, the fallback message said
+  only that no usable rules were inferred. It now reports how many were
+  rejected, which distinguishes "the model returned nothing" from "the model
+  returned rules and all of them were malformed" — a difference that decides
+  whether re-running is worth it.
+
+- **`_streamed_download` accepted a `chunk_size` and ignored it.** The value
+  was never forwarded to the function that does the writing, which hardcoded
+  8192, so tuning it had no effect. No caller passed a non-default value, so
+  nothing was mis-downloading; the knob simply did not work.
+
+- **Cancelling the no-hashfile menu was reported as an invalid selection.**
+  `interactive_menu` returns `None` for a bare Enter in numbered mode and for
+  Escape in arrow-key mode. Every other menu treats that as its cancel option,
+  but the menu shown when no hash file is given fell through to
+  `[!] Invalid selection` and re-prompted, so a deliberate cancel looked like a
+  typo. It now re-shows the menu silently, matching the main menu; an answer
+  that matches no menu key still warns.
+
+
+- **"Leave blank to skip" skipped every remaining custom charset, not just
+  one.** The Ad-hoc Mask Attack prompts for charsets `-1` through `-4`, but a
+  blank answer broke out of the loop, so a mask using `?1` and `?3` without
+  `?2` could not be entered and hashcat failed on the undefined token. Each
+  slot is now independently skippable.
+- **README documented a menu environment variable that does not exist.** It
+  named `HATE_CRACK_PLAIN_MENU=1` (read by nothing) and claimed arrow-key
+  navigation is the default. Numbered menus are the default; arrow keys are
+  opt-in through `HATE_CRACK_ARROW_MENU=1`, which was undocumented.
+- **README told contributors to install a `post-commit` hook that does not
+  exist, and omitted the `pre-commit` stage that does.** `prek.toml` defines six
+  local `pre-push` hooks (the documented list was missing `ruff-format` and
+  `bandit`) plus six `pre-commit` hooks from `pre-commit/pre-commit-hooks`,
+  including the repo's only secret-scanning gate. Following the old
+  instructions left `detect-private-key` uninstalled.
+
+
+- **`--download-hashview` prompted for a menu choice and then ignored it.** The
+  no-hashfile menu's first branch was guarded by `or args.download_hashview`,
+  so with the flag set, choosing Wordlist Tools, Rule File Tools, or even Exit
+  all opened the Hashview flow. The flag now skips the menu entirely, and the
+  menu's own choices are honoured when it is absent.
+
+- **The Random Rules and LLM rule attacks wrote no hashcat debug log.** Five of
+  the seven attacks that pass `-r` to hashcat call `_add_debug_mode_for_rules`,
+  which wires `--debug-mode`/`--debug-file` to `hcatDebugLogPath`;
+  `hcatGenerateRules` and `hcatOllama`'s per-rule pass did not, so there was no
+  way to see which rule cracked which hash for exactly those two. A new test
+  pins the invariant for every future rule-based attack.
+
+- **`hashview download-hashes --hash-type` did nothing.** The flag existed only
+  to feed `download_left_hashes`, whose `hash_type` parameter had been unused
+  since the download flow was overhauled and its `hashcat -m` verification run
+  removed. Both the flag and the parameter are gone; the `--hash-type` flags on
+  `upload-cracked` and `upload-hashfile-job` are unaffected.
+
+- **The same attack could run with or without `-O` depending only on whether a
+  `config.json` existed.** `hcatPCFG` was listed in the example's
+  `optimizedKernelAttacks` but missing from the `DEFAULT_OPTIMIZED_ATTACKS`
+  fallback in code, so a user with no config file got un-optimized kernels for
+  it. The default now matches the example, and two new tests assert that the
+  two lists stay equal and that every name in the list actually reaches
+  `_should_use_optimized_kernel`.
+
+- **The Spoonman attack derived basewords and rules from the hash as well as the
+  password.** `rulegen.generate` treated each corpus line as a password in full,
+  but the corpus the attack is built for — and that its own menu text recommends
+  — is a previous engagement's cracked output, whose lines are `hash:password`.
+  The digest's hex digits were therefore prepended to every baseword, and 20–30
+  of the 31 available rule functions were spent rebuilding them.
+
+  The damage compounded. Because every hash is unique, every derived baseword and
+  rule was unique too, which destroyed the property the attack exists for: a rule
+  file ranked by productivity and safe to truncate. And because rebuilding the
+  prefix nearly exhausted `MAX_RULE_FUNCTIONS`, real transformations tipped over
+  the limit into the literal fallback — emitting the password as its own
+  baseword, so the corpus became its own wordlist.
+
+  Measured on a 22,283-line cracked-output file: distinct basewords 22,284 →
+  9,912 (previously one per line, i.e. no deduplication at all), literal
+  fallbacks 5,388 → 31, rules needed for 95% coverage 15,783 → 11,730.
+
+  `$HEX[...]` plaintexts are now decoded here too, and a corpus that looks like
+  an uncracked dump rather than cracked output is reported in `coverage.txt` and
+  warned about.
+
+- **`notify_suppress_in_orchestrators` did nothing.** The key was parsed into
+  `NotifySettings` and unit-tested for parsing, but `suppressed_notifications()`
+  set its thread-local flag unconditionally, so there was no way to get a
+  notification per attack inside Extensive Crack. The context manager now
+  consults the setting. README also overstated the scope: only Extensive Crack
+  suppresses, and Quick Crack with N rule chains has always sent N
+  notifications.
+- **`--update` (and the startup upgrade prompt) no longer dead-ends on a clone
+  whose tags diverge from the remote's.** If any local tag pointed at a
+  different object than `origin`'s, `git fetch --tags` exited non-zero with
+  `would clobber existing tag`; `_run_upgrade()` treated that as fatal and
+  aborted, so the affected clone could never upgrade itself again. Worse, the
+  manual recovery commands the tool printed omitted `--force` too, so following
+  its own advice failed the same way. Both fetches in the upgrade path — the
+  pre-checkout one and the one inside the final shell chain — now pass
+  `--tags --force`, as do the four printed fallback command strings. `--force`
+  affects tag updates only and cannot discard commits or working-tree state.
+- **`--update` now advances the checkout by resetting to `origin`, not by
+  merging, so it also works on a clone whose history was rewritten.** Forcing
+  the tag fetch alone was not enough: the upgrade went on to run
+  `git pull origin <branch>`, and a clone predating the July 2026 history
+  rewrite shares no ancestor with `origin/main`, so the pull aborted with
+  `Need to specify how to reconcile divergent branches` and the upgrade never
+  reached `make install`. `_run_upgrade()` now runs `git checkout -B <branch>
+  origin/<branch>` on every upgrade — previously only when HEAD was on some
+  other branch, which is why users already sitting on `main` were the ones who
+  hit this — and the final shell chain is reduced to `make install`. The
+  uncommitted-changes guard became unconditional to match, since the reset now
+  fires on every run; the printed recovery commands use the reset form too.
+  Users stranded by the earlier versions need a one-time manual recovery,
+  documented under Troubleshooting in the README.
+
+## [2.17.2] - 2026-07-29
+
+### Security
+
+- **`config.json` backups are now gitignored.** Only the exact name
+  `config.json` was ignored, so a timestamped or editor backup
+  (`config.json.bak-<date>`, `config.json.orig`, `config.json~`) sat untracked
+  but stageable in a checkout while holding the same populated
+  `hashview_api_key` / `hashmob_api_key` values as the live config. Since this
+  is a public repo and CI has no secret scanning, a `git add -A` was the only
+  step between a local backup and published credentials. `.playwright-mcp/`
+  scratch output is ignored for the same reason. (#191)
+
+### Changed
+
+- **CI now lints and format-checks `tests/` alongside `hate_crack/`.** The ruff
+  gates previously covered only the package, so the test suite had accumulated
+  21 unused imports, one unused binding, and 51 unformatted modules — all of
+  which are now fixed and gated. `ty` still checks `hate_crack/` only. (#190)
+- **`ty` dev dependency raised** to 0.0.65. Dev-only; does not affect the
+  installed package. (#185)
+- **Spoonman Attack output is now ephemeral.** Derived basewords and rules are
+  written to `<hash file>.spoonman/` beside the hash file, matching the other
+  ephemeral wordlists (`.expanded`, `.combined`), instead of persisting under
+  `<hcatOptimizedWordlists>/spoonman/<corpus name>/`. The directory is removed
+  by the temp-file cleanup on exit. Derivation is still skipped when the corpus
+  has not changed since a prior run against the same hash file. This also
+  removes the collision between two different corpora that share a filename. (#186)
+
+### Fixed
+
+- **Temp-file cleanup no longer breaks when a hashfile is switched via the
+  Hashview API.** Accepting "Switch to this hashfile for cracking?" rebound
+  `hcatHashFile` but left `hcatHashFileOrig` pointing at the previous hashfile
+  (or, when reached before the startup fallback, unset). `cleanup()` keys every
+  removal and the cracked-vs-original comparison off the original, so switching
+  from the main menu stranded the new hashfile's `.combined`, `.lm`,
+  `.lm.cracked`, `.working` and `.passwords` artifacts and wrote the `.out`
+  comparison against the wrong file. The switch now rebinds both, and
+  `cleanup()` falls back to the live hashfile when the original is unset, so a
+  future missed assignment degrades to "skips the pwdump comparison" rather
+  than silently cleaning up nothing at all. (#187)
+- **Flaky notify burst-cap tests.** `TestCrackTailerBurstCap` asserted on
+  aggregate counts that a split burst could satisfy in more than one way, so the
+  tests failed intermittently under load. Replaced with five deterministic
+  assertions on per-tick semantics. Test-only; no runtime behaviour changed.
+  (#188)
+
+## [2.17.1] - 2026-07-29
+
+### Changed
+
+- **Dependency floors raised.** `openai` >=2.50.0, `openpyxl` >=3.1.5,
+  consolidating #178 and #179. (#180)
+- **`instructor` excluded from Dependabot as a durable policy, not a
+  temporary skip.** `atomic-agents` 2.9.1 pins `instructor==1.14.5` exactly
+  and imports internals (`instructor.core.client`,
+  `instructor.processing.multimodal`, `instructor.dsl.partial`,
+  `instructor.processing.schema`) that `instructor` 1.15.x reorganized.
+  Forcing the bump with an override resolves but fails at import with
+  `AttributeError: module 'instructor' has no attribute 'core'`, so the
+  `.github/dependabot.yml` `ignore` entry stays until `atomic-agents`
+  relaxes its pin. (#141)
+
+## [2.17.0] - 2026-07-29
+
+### Added
+
+- **`--nightly` update channel.** `--nightly` (or `--update --nightly`) updates
+  from the `nightly-dev` branch instead of `main`, for work that has passed CI
+  but has not been cut into a release. `--update` is unchanged and still tracks
+  releases on `main`. The startup update check only ever offers releases: it
+  reads GitHub's "latest release" endpoint, which excludes pre-releases, and
+  nightly builds publish no GitHub release at all.
+
+- **Spoonman Attack (main menu `22`).** Derives a baseword list and a
+  frequency-sorted hashcat rule file from a corpus of known plaintext
+  passwords, such that the baseword x rule cross product reconstructs the
+  corpus. Rules are ordered most-productive-first so the file is truncatable;
+  the menu offers the full set, top 99%, or top 95% coverage. Output is cached
+  per corpus under `<hcatOptimizedWordlists>/spoonman/` and reused until the
+  corpus changes. Contributed by @Spoonman1091. (#169)
+
+  The derivation enforces hashcat's limit of 31 functions per rule, falling
+  back to emitting the password as its own literal baseword. hashcat drops
+  over-long rules *silently* when valid rules share the file, so without the
+  guard a corpus containing such passwords would quietly fall short of the
+  coverage it reported.
+
+### Changed
+
+- **No-hash-file menu no longer duplicates the download entries.** The Weakpass
+  and Hashmob wordlist downloads already live in Wordlist Tools, and the Hashmob
+  rule download already lives in Rule File Tools, so the three top-level copies
+  were removed. The menu is now `1` Hashview API, `2` Wordlist Tools, `3` Rule
+  File Tools, `4` Exit. The `--weakpass`, `--hashmob`, and `--rules` CLI flags
+  are unaffected; they short-circuit before this menu is drawn.
+
+## [2.16.0] - 2026-07-29
+
+### Changed
+
+- **Wordlist and rule downloads moved into their tool submenus.** The Hashmob
+  and Weakpass wordlist downloads are now options `9` and `10` of Wordlist
+  Tools (main menu `80`), and the Hashmob rule download and rule analyzer are
+  options `4` and `5` of Rule File Tools (main menu `81`). The main menu's
+  `90`–`93` block is gone. If you had those keys in muscle memory: `90` is now
+  Rule File Tools option 4, `91` is Rule File Tools option 5, `92` is Wordlist
+  Tools option 9, and `93` is Wordlist Tools option 10. The `--hashmob`,
+  `--weakpass`, and `--rules` non-interactive flags are unchanged. (#166)
+- **Duplicate menu mapping divergence.** `hate_crack.py`'s copy of the main
+  menu had key `91` wired to the Weakpass menu while both its own label and
+  `main.py` said "Analyze Hashcat Rules", so that key ran the wrong handler
+  through the proxy path. The key is now retired and both mappings agree.
+  (#166)
+
+## [2.15.1] - 2026-07-28
+
+### Fixed
+
+- **PCFG ruleset casing on case-insensitive filesystems.** The exact-match
+  fast path in `_resolve_pcfg_ruleset_dir` used `os.path.isdir()`, which
+  returns true for a wrong-cased path on macOS and Windows, so a
+  `pcfgRuleset` of `"DEFAULT"` was handed back verbatim instead of resolving
+  to the real `Default` directory — defeating the case-insensitive fallback
+  scan added in 2.14.8. Resolution now tries a real case-sensitive match
+  before falling back. This was also the root cause of the intermittent
+  `test_regenerates_when_cache_stale` failure. (#165)
+
+## [2.15.0] - 2026-07-28
+
+### Added
+
+- **End-to-end test suite for the non-interactive CLI.** Adds the e2e harness,
+  shared fixtures (hashes, wordlists, rules), and coverage for the four
+  non-interactive subcommands. Opt-in via `HATE_CRACK_RUN_E2E=1`. The NTLM
+  fixture generator uses a pure-Python MD4 implementation, since `hashlib`'s
+  MD4 is unavailable on OpenSSL builds that disable legacy providers. (#164)
+
+### Changed
+
+- **Weakpass listings parsed as JSON instead of scraped HTML.**
+  `hate_crack/api.py` now reads weakpass.com's Inertia `data-page` payload
+  with the standard library rather than parsing the rendered page, and the
+  `beautifulsoup4` runtime dependency is dropped — `api.py` was its only
+  consumer. (#139)
+- Dependency bumps: `openai` >=2.49.0, `atomic-agents` >=2.9.1, `ty` 0.0.64,
+  `setuptools-scm` >=10.2.1.
+
+## [2.14.9] - 2026-07-28
+
+### Fixed
+
+- **Unwritable install tree crashed wordlist and rule downloads.**
+  `get_hcat_wordlists_dir`/`get_rules_dir` now guard their `os.makedirs` call
+  with `try/except OSError` and fall back to the cwd-relative default.
+  Follow-up to #153 (shipped in 2.14.8), which started resolving these
+  defaults against the install tree and dropped the broad `except Exception`
+  that had been masking the failure — so an unprivileged user on a root-owned
+  or read-only install got a raw `PermissionError` traceback. (#163)
+
+## [2.14.8] - 2026-07-28
+
+### Fixed
+
+- **PCFG ruleset default casing.** `pcfgRuleset` now defaults to `"Default"`,
+  matching the on-disk `pcfg_cracker/Rules/Default` directory, and both
+  `hcatPCFG` and `hcatPrinceLing` resolve the configured ruleset name
+  case-insensitively against whatever casing actually exists on disk. This
+  covers both a fresh install (prior default `"DEFAULT"` only worked by
+  accident on case-insensitive filesystems like macOS) and anyone whose
+  `config.json` already has `"DEFAULT"` backfilled to disk from before this
+  fix. (#148)
+- **PCFG silent candidate truncation on non-TTY stdin.** `hcatPCFG` now keeps
+  the `pcfg_guesser.py` child's stdin open (`stdin=subprocess.PIPE`) instead
+  of inheriting hate_crack's own stdin. Previously, any non-TTY stdin (cron,
+  CI, detached runs, piped input) caused the guesser's keypress-listener
+  thread to hit `EOFError` and shut the generator down after tens of
+  thousands of candidates, silently ignoring `--limit`/`pcfgMaxCandidates`.
+  (`prince_ling.py` was checked for the same exposure and doesn't have a
+  keypress thread, so it needed no change.) (#146)
+- **Uncaught OSError loading config.json.example defaults.** A missing or
+  unreadable defaults file (e.g. a dangling symlink surviving a
+  git-archive tarball or docker COPY) now surfaces the existing "package
+  installation issue" message instead of a raw traceback. (#155)
+- **Brittle config.json.example test guards.** Replaced a symlink-ness
+  assertion (fails outside the source tree, since builds dereference the
+  symlink) and a same-inode tautology with an explicit expected-key-set
+  check and a content-parity check that's exercised in built/flattened
+  trees. (#154)
+- **api.py/main.py config default divergence.** `api.py`'s
+  `get_hcat_wordlists_dir`/`get_rules_dir`/`get_hcat_tuning_args`/
+  `get_hcat_potfile_path` now merge `config.json.example` the same way
+  `main.py` does, instead of falling back to their own hardcoded,
+  cwd-relative defaults for any key absent from `config.json`. (#153)
+
+## [2.14.7] - 2026-07-28
+
+### Fixed
+
+- **PCFG/PRINCE-LING interpreter drift.** `hcatPCFG`/`hcatPrinceLing` now
+  launch `pcfg_guesser.py`/`prince_ling.py` via `sys.executable` instead of
+  a bare `python3` resolved from `PATH`, so they run under the same pinned
+  interpreter and environment as hate_crack itself. (#149)
+
+## [2.14.6] - 2026-07-28
+
+### Changed
+
+- **Narrower config.json search path.** `_candidate_roots()` in both `main.py`
+  and `api.py` now checks only the repo/package directory and
+  `~/.hate_crack`, dropping the current working directory and its parent,
+  `/opt/hate_crack`, `/usr/local/share/hate_crack`, and the
+  `~/hate_crack`/`~/hate-crack` variants. This makes which config file is in
+  effect predictable rather than dependent on where you happened to run the
+  tool from. README updated to match. (#152)
+
+## [2.14.5] - 2026-07-28
+
+### Fixed
+
+- **config.json.example drift between the root and packaged copies.** Ten keys
+  were missing from the packaged copy, four dead PassGPT keys were still
+  shipped, and `hcatPath` disagreed. The packaged copy is now a symlink to the
+  root file, with a test asserting both parse to identical JSON so drift fails
+  CI instead of shipping silently. (#150, #151)
+- **Stale defaults persisted into user configs.** hate_crack no longer writes
+  missing keys back into your `config.json` on load. Previously a wrong default
+  in the example file got permanently baked into every user's config on the
+  next run; defaults are now merged in memory only. (#151)
+
+## [2.14.4] - 2026-07-28
+
+### Fixed
+
+- **OMEN finished in seconds instead of doing real work.** The in-code fallback
+  default for `omenMaxCandidates` (used when the key is absent from
+  `config.json`) was 1,000,000. Raised to 100,000,000 in both `main.py` and
+  the shipped `config.json.example`. (#145, #147)
+- **Flaky `test_main_pcfg`.** A leaked `hate_path` global let test ordering
+  decide the outcome.
+
+### Changed
+
+- **README menu block synced with the code.** The documented main menu still
+  showed pre-consolidation numbering (LLM at 15, OMEN at 16) and omitted
+  Notifications, PCFG, and PRINCE-LING entirely. Also adds the missing N-gram,
+  PCFG, and PRINCE-LING attack sections and a PCFG configuration section.
+  (#138)
+- Dependency bumps: `ruff` 0.16.0 (with the lint rule set pinned to pre-0.16
+  defaults), `ty` 0.0.63, `setuptools` >=83.0.0, `beautifulsoup4` >=4.15.0.
+
+## [2.14.3] - 2026-07-25
+
+### Added
+
+- **Private-key commit gate.** `prek.toml` now runs the `detect-private-key`
+  hook at the pre-commit stage. The repo previously had no secret-scanning gate
+  of any kind — bandit only covers `hate_crack/`, so nothing inspected config
+  files, docs, or test fixtures for committed key material.
+
+### Removed
+
+- **Local agent tooling is no longer published.** `CLAUDE.md`, `.claude/`,
+  `docs/plans/`, and `docs/superpowers/` were development aids rather than part
+  of the shipped project. They are now gitignored and were removed from the
+  repository, including from its history.
+- **`audit-docs` post-commit hook.** Dropped from `prek.toml` along with the
+  `.claude/audit-docs.sh` script it invoked.
+
+## [2.14.2] - 2026-07-25
+
+### Fixed
+
+- **Pipal base-word parsing.** `pipal()` built one rigid regex that required
+  *exactly* `pipal_count` consecutive base-word lines, so any cracked set with
+  fewer unique base words than `pipal_count` (default 10 — the common case on
+  small cracks) matched nothing and returned no base words. The `Top N base
+  words` section is now parsed line by line, returning up to `pipal_count`
+  words and stopping at the end of the section.
+- **Shell-safe pipal invocation.** The pipal subprocess is now spawned with
+  list-form arguments instead of a `shell=True` formatted string, so hash-file
+  paths containing shell metacharacters can no longer be interpreted as
+  commands.
+
+### Changed
+
+- Renamed the internal `_omen_pick_training_wordlist` helper to
+  `_pick_training_wordlist`, since it is shared by the OMEN, Markov-adjacent,
+  and LLM (wordlist mode) attacks rather than being OMEN-specific.
+
+## [2.14.1] - 2026-07-25
+
+### Fixed
+
+- **Tab completion on custom file-path prompts.** The `p. Enter a custom path`
+  branches of the OMEN and Markov training pickers, the combipow wordlist
+  prompt, and the rule cleanup/optimize output-path prompts used a bare
+  `input()` with no readline completer, so TAB did nothing. They now route
+  through `select_file_with_autocomplete` for consistent path autocompletion.
+- **Stale completer leak.** `select_file_with_autocomplete` and the
+  `_configure_readline`-based pickers now drop the path completer after a
+  selection, so later numeric-menu and y/n prompts no longer inherit file-path
+  tab completion.
+
+## [2.14.0] - 2026-07-24
+
+### Added
+
+- **Non-interactive attack subcommands** for scripting (issue #17). Launch a
+  single attack without the menu: `quick` (wordlist + optional `--rules`),
+  `dict` (configured-wordlist methodology), `brute` (`--min`/`--max`), and
+  `topmask` (`--target-time`). Preprocessing prompts auto-accept their
+  defaults, and the process returns a clean exit code (0 on success, non-zero
+  on a bad hash file, hash type, wordlist, or rule name).
+
+## [2.13.1] - 2026-07-24
+
+### Fixed
+
+- **`OLLAMA_HOST` values that include a scheme no longer produce a malformed URL**
+  (issue #119). The Ollama base URL was built as `"http://" + OLLAMA_HOST`, so a value in
+  the form Ollama's own tooling accepts — `http://box:11434` or
+  `https://ollama.example.com` — became `http://http://box:11434` and the LLM attack could
+  not connect. `http://` is now prepended only when no scheme is present, and trailing
+  slashes are stripped because callers append paths (`f"{ollamaUrl}/v1"`). Reaching a remote
+  Ollama over TLS works as a result. The bare `host:port` default is unchanged.
+
+## [2.13.0] - 2026-07-24
+
+### Added
+
+- **Cracked-password generation mode** for the LLM attack. Once a session has recovered
+  plaintexts, option 3 feeds them back to the model, which infers the organization's own
+  password conventions and generates new candidates in that style. Offered only when
+  `<hashfile>.out` has content, and it uses a dedicated prompt that tells the model not to
+  re-emit passwords already cracked.
+- **Target research pre-fills the industry and location prompts.** In target mode, entering
+  the company name asks the local model to recall that organization's industry and location,
+  then offers them as editable defaults (Enter accepts, typing overrides). Values are
+  labelled as model guesses rather than verified OSINT, whitespace-collapsed, and capped at
+  80 characters. Research runs entirely against the local Ollama server, so the client name
+  is never sent to a third party. Any failure or timeout falls back to blank prompts and
+  never blocks the attack. Disable with `ollamaAutoResearch: false`.
+- **Live progress spinner** with an elapsed-seconds counter during Ollama generation, so a
+  model loading into VRAM is distinguishable from a hang. Automatically suppressed when
+  stdout is not a TTY.
+- **`ollamaMaxSampleLines`** (default 500) caps how many sample passwords are sent to the
+  model, for both wordlist and cracked-password modes.
+
+### Fixed
+
+- **A large sample wordlist no longer stalls the LLM attack.** Wordlist mode read every line
+  into memory and pasted all of them into the prompt, so pointing it at `rockyou.txt`
+  materialized hundreds of megabytes and overran the model's context window — which looked
+  like a hang. The file is now streamed and evenly sampled across its whole length, and the
+  count actually used is reported (`Sampled 500 of 14,344,391 passwords from wordlist.`).
+- **`HATE_CRACK_ARROW_MENU=1` now works in the LLM and OMEN submenus.** They hand-rolled
+  `print()` + `input()` instead of the shared menu helper, so arrow-key navigation silently
+  did nothing there.
+- **A typo in a wordlist or generation-mode prompt no longer aborts the whole attack.** The
+  pickers and submenus re-prompt instead of dropping back to the main menu, and offer an
+  explicit cancel.
+
+### Changed
+
+- **Interactive prompt formatting normalized** — the `[*] ` marker is no longer used on
+  input prompts (it denotes status output elsewhere), and default-value hints use a single
+  form.
+
+### Build
+
+- **Local `uv` Python pinned to 3.13** via `.python-version`. `requires-python = ">=3.13"`
+  meant a fresh worktree picked CPython 3.15.0a7 and failed to build pyo3 0.26 (via
+  `jiter`/`fastuuid`/`pydantic-core`). CI already pinned 3.13.
+
+## [2.12.0] - 2026-07-24
+
+### Changed
+
+- **LLM attack now uses the Atomic Agents framework** for structured (JSON) candidate
+  generation instead of raw HTTP + regex line-parsing. Candidate generation lives in the
+  new `hate_crack/llm.py` module.
+- **Default Ollama model is now `qwen2.5:32b`** (was `mistral`), chosen for reliable
+  structured-output adherence.
+
+### Added
+
+- **Wordlist (denylist) generation mode** for the LLM attack is now reachable from the
+  menu: select the LLM attack (option 12), then choose "Wordlist" to derive basewords from
+  a sample wordlist.
+
+### Fixed
+
+- **The LLM attack no longer hangs forever waiting on Ollama.** Generation requests are now
+  bounded by a configurable timeout (`ollamaTimeout` in `config.json`, default 300 seconds).
+  Previously, if Ollama accepted the connection but never replied — most commonly a large
+  model still loading into VRAM — hate_crack sat at a frozen prompt with no recourse but
+  Ctrl-C. When the timeout fires you now get a specific message naming the elapsed timeout
+  and the setting to raise, instead of a misleading "ensure Ollama is running" hint.
+
+### Removed
+
+- **Automatic model pulling.** hate_crack no longer pulls missing Ollama models; pull them
+  yourself with `ollama pull <model>`.
+
+## [2.11.4] - 2026-07-24
+
+### Added
+
+- **CI now runs lint, type checks, and tests on every pull request and push to `main`.**
+  Previously these ran only in local `prek` pre-push hooks, so a commit pushed without hooks
+  installed (or with `--no-verify`) reached `main` unvalidated — and the auto-tag workflow
+  would then cut a release from it. The new `ci.yml` runs `ruff`, `ty`, and `pytest` on
+  Python 3.13, and tagging is gated on it passing.
+- **Dependabot configuration** for Python (`uv`) and GitHub Actions dependencies, weekly.
+  Action pins are updated automatically instead of drifting. Bumps use `chore` commit
+  prefixes so they never auto-cut a release.
+
+### Fixed
+
+- **Auto-tagged versions now actually get a GitHub release.** The tag was pushed using the
+  default `GITHUB_TOKEN`, and GitHub suppresses workflow triggers for `GITHUB_TOKEN`-created
+  events, so the tag-triggered release workflow never fired — `v2.11.3` was tagged with no
+  release to show for it. The auto-tag workflow now creates the release itself, idempotently.
+- **Breaking changes no longer ship as a minor bump.** The version logic matched the `!`
+  breaking-change marker but only ever bumped the minor version, and `BREAKING CHANGE:`
+  footers were invisible because only commit subjects were inspected. Both now correctly
+  trigger a major bump.
+- **Concurrent merges to `main` no longer collide.** Two merges in quick succession both
+  computed the same new tag and the second push failed; tagging is now serialized. A re-run
+  against an already-tagged commit is also a clean no-op instead of a hard error.
+- **`softprops/action-gh-release` is pinned to a real release** (`v2.6.2`) rather than an
+  arbitrary mid-development `master` commit, and all workflows now pin the same
+  `actions/checkout` version with accurate version comments.
+- **`ty` type error in the crack tailer.** `_read_new_lines` read `self._file_pos`
+  (`int | None`) while its only None-guard lived in the caller, so the position is now
+  passed in explicitly as an `int`. Behavior is unchanged.
+
+## [2.11.3] - 2026-07-24
+
+### Fixed
+
+- **Rule file cleanup no longer errors out.** `rules_cleanup` (Rule File Tools → "Clean
+  rule file" / "Clean and optimize") invoked `cleanup-rules.bin` with no arguments, but the
+  binary requires a `mode` argument (`1` = CPU, `2` = GPU) and exits with usage text
+  otherwise — so cleanup always failed. It now passes the mode (defaulting to GPU) so the
+  cleanup actually runs.
+
+## [2.11.2] - 2026-07-23
+
+### Added
+
+- **Hashview cracked-hash upload now reports how many hashes landed.** After an upload the
+  CLI prints the number of pairs the client sent and how many it skipped by validation —
+  available regardless of the server version — and, against a Hashview that reports import
+  counts, also shows how many were newly cracked, verified, and left unmatched (already
+  cracked or not present). `upload_cracked_hashes` surfaces `uploaded`/`skipped` in its
+  return value alongside any server-provided counts. Previously the upload only printed
+  `✓ Success: OK` with no indication of how many hashes were accepted.
+
+## [2.11.1] - 2026-07-23
+
+### Fixed
+
+- **Hashview cracked-hash uploads no longer choke on hashcat `$HEX[...]` plaintexts.**
+  hashcat emits `$HEX[...]` for recovered passwords containing leading/trailing
+  whitespace or non-UTF-8 bytes. `upload_cracked_hashes` forwarded those verbatim, so a
+  Hashview that verifies the plaintext against the hash rejected the entire batch with
+  `Plaintext for hash ... was found to be invalid.` The uploader now decodes `$HEX[...]`
+  to the exact bytes the server must re-hash — latin-1→UTF-8 for the UTF-16LE modes
+  (NTLM 1000, MSSQL 1731), raw bytes for the raw-byte modes (0/100/300/900/1400/1700) —
+  and keeps the `$HEX` wrapper verbatim when inlining would be unsafe (embedded CR/LF) so
+  a `$HEX`-aware server can still handle it. Verified end-to-end against an unpatched
+  Hashview.
+
+### Added
+
+- **Client-side validation of cracked hash:plaintext pairs before Hashview upload.**
+  `upload_cracked_hashes` now filters each pair against the declared hashcat mode: a
+  length check for wrong-width hashes, plus a plaintext recompute for the reproducible
+  fast modes (MD5, SHA1, MD4, NTLM, SHA2-256/512). Mismatched lines (e.g. a stray MD5
+  hash mixed into an NTLM list) are skipped with a per-line warning instead of failing
+  the whole upload server-side, and it raises clearly if nothing valid remains. Bundles a
+  pure-Python MD4 since OpenSSL 3 dropped it from `hashlib`. Opt out with `validate=False`.
+
+## [2.11.0] - 2026-07-23
+
+### Changed
+
+- **Shard Wordlist (Wordlist Tools option 7) now produces all shards in a single run.**
+  Instead of prompting for a modulus + offset and emitting one file per invocation, it
+  prompts for an output *base path* and a shard count (N), then writes all N interleaved
+  parts named with zero-padded part numbers (`base.001`…`base.00N`). This matches the
+  intended distributed-cracking workflow — split once, copy one part per node — without
+  re-running the tool for each offset. README usage docs updated accordingly.
+
+## [2.10.10] - 2026-07-21
+
+### Security
+
+- **Bumped the pinned dev/test dependency `pytest` from 9.0.2 to 9.0.3** to clear the
+  vulnerable tmpdir-handling advisory GHSA-6w46-j5rx-g56g (affects pytest < 9.0.3;
+  Dependabot alert #1). Development-scope test runner only — no runtime dependency change.
+  The full test suite passes under 9.0.3. (`uv.lock` is gitignored, so only the
+  `pyproject.toml` pin is tracked.)
+
+## [2.10.9] - 2026-07-21
+
+### Fixed
+
+- **Quick Crack default wordlist stays on `hcatOptimizedWordlists`.** The numbered list and
+  tab-completion browse `hcatWordlists`, but pressing Enter still falls back to
+  `hcatOptimizedWordlists` as before.
+
+## [2.10.8] - 2026-07-21
+
+### Fixed
+
+- **Hashview `list_customers` crashed against current servers.** The `/v1/customers`
+  response now returns its `users` array as native JSON (Hashview issue #229), but the
+  client still ran `json.loads()` on it unconditionally, raising `TypeError` and breaking
+  the entire customer → hashfile enumeration flow. Both the native-array and the legacy
+  double-encoded-string shapes are now accepted.
+- **Hashview hash-type parsing mis-read MD5 (mode 0).** `get_hashfile_details` selected the
+  hash type with an `or` fallthrough, so the falsy `0` fell through to the response
+  envelope's `type` field and returned the string `"message"`. Hash type is now read by key
+  presence, and the bogus `type` fallback was removed.
+- **Hashview `get_hashfile_hash_type` always returned an empty list.** It looked for
+  `file_ids`/`ids`/`hashfile_ids` keys the endpoint never sends; it now reads the actual
+  `hashfiles` envelope array and extracts each file id.
+
+### Added
+
+- **Download Hashview rule files.** New `HashviewAPI.list_rules()` and `download_rules()`
+  wrap `GET /v1/rules` and `GET /v1/rules/{id}`. The server gzip-compresses plaintext rules
+  on the fly, so downloads are decompressed before saving — the resulting file is usable
+  directly with `hashcat -r`. Exposed via the interactive Hashview menu ("Download Rule")
+  and the CLI: `hate_crack.py --hashview download-rules --rules-id <id> [--output <file>]`.
+
+## [2.10.7]
+
+- Auto-upgrade (`hate_crack --update` / the in-menu upgrade) now survives the historical `master` → `main` default-branch rename. Old clones made before the rename sit on a local `master` whose upstream (`branch.master.merge`) still points at the now-deleted `refs/heads/master`, so a bare `git pull` failed with "Your configuration specifies to merge with the ref 'refs/heads/master' from the remote, but no such ref was fetched" — and `_run_upgrade()`'s `git checkout main` also failed on stale clones that had never fetched `origin/main`. The updater now fetches from `origin` *before* switching branches, checks out `main` via `git checkout -B main origin/main` (creating/resetting it from the remote regardless of local state), repairs the upstream with `git branch --set-upstream-to=origin/main main` so future manual `git pull`s work too, and pulls explicitly with `git pull origin main` so it never consults the dangling `branch.*.merge` config. Existing safety guards (dirty-branch bail, detached-HEAD skip) are unchanged.
+
+## [2.10.6]
+
+- Fixed the Hashview integration calling API routes that don't exist in Hashview (verified against v0.8.3-dev), which 404'd as soon as a customer ID was entered ("Could not list hashfiles"). The customer→hashfile listing relied on a phantom `GET /v1/hashfiles` list-all route; it now enumerates via the real `GET /v1/hashfiles/hash_type/<type>` endpoint where available — the download flow sweeps common hashcat modes to display a customer's uploaded hashfiles. That listing route only exists on Hashview builds from 2026-06-08+ (the `v0.8.3-dev` branch); on `main`/older servers there is no hashfile-listing API at all, so the flow now degrades gracefully to entering the hashfile ID directly (looked up in the Hashview web UI) and resolving its type via `GET /v1/getHashType/<id>`. Additional client-side route fixes: hashfile hash-type lookup now uses `GET /v1/getHashType/<id>`; "left" (uncracked) hash download uses `GET /v1/hashfiles/<id>`; `delete_job` uses `DELETE /v1/jobs/<id>`; `start_job` uses `POST`. Hashview exposes no stop-job route, so `stop_job` now raises with guidance to use `delete_job`; and no bulk cracked-hash export exists, so the best-effort "found" merge degrades gracefully.
+- The Hashview CLI now honours `HASHVIEW_URL` / `HASHVIEW_API_KEY` environment variables as overrides for the `config.json` values, so the client can be pointed at a different Hashview instance (e.g. a local dev stack) without editing the persisted config.
+- Added an opt-in local Hashview integration-test harness: `HASHVIEW_TEST_LOCAL=1` (with `HASHVIEW_REPO=<path>`) spins up and seeds a local Hashview docker stack, runs the live Hashview tests against it, and tears it down (`HASHVIEW_KEEP=1` keeps it). This is what surfaced and verified the route fixes above against `v0.8.3-dev`. See the README testing section for details.
+
+## [2.10.5]
+
+- Pipal analysis no longer corrupts its input when cracked passwords contain `$HEX[...]` rows. `binascii.unhexlify().decode()` returned the bytes without the trailing newline that normal rows inherit from `password[-1]`, so every HEX-encoded password got concatenated with the next one in the `.passwords` file fed to pipal (e.g. three cracks → two lines, one of them a bogus mashup). Pipal then under-counted entries and reported wrong top base words. The HEX branch now re-appends `\n` so each cracked password lands on its own line.
+
+## [2.10.4]
+
+- Pushover notifications fire correctly for Quick Crack, Loopback, Combinator, PRINCE-LING, and N-gram attacks (#110). The handlers prompted the user under one name (e.g. "Quick Crack") while the underlying hashcat wrapper passed a different `attack_name` to `_should_fire` ("Quick Dictionary"), so the per-run consent lookup always missed. The prompt name now flows down to `_run_hcat_cmd` for both the job-done summary and the per-crack tailer.
+
+## [2.10.3]
+
+- Auto-upgrade no longer loops infinitely when invoked from a non-main branch (e.g. `dev`). Release tags live on main-side merge commits, so `git pull` on `dev` was a no-op and setuptools-scm kept regenerating the version as `X.Y.Z.postN.devM` — the update check then re-fired forever. `_run_upgrade()` now switches to `main` before pulling, with safety guards: refuses to clobber uncommitted work, surfaces clear errors when `main` is checked out in another worktree, and leaves detached-HEAD checkouts untouched.
+
+## [2.10.2]
+
+- Fingerprint Attack no longer launches hashcat against empty wordlists when no candidates exist; prints a "no candidates to expand" message and skips the attack (plus the secondary hybrid pass that previously fired six wasted hashcat sessions).
+- Forced `LC_ALL=C` on every `sort -u` subprocess (fingerprint expander pipeline, `_write_field_sorted_unique`, LM-to-NT combinator dedupe) — fixes "sort: Illegal byte sequence" on macOS when cracked passwords contain non-UTF-8 bytes, which was silently emptying the fingerprint candidate list.
+
+## [2.10.1]
+
+- Bumped `HashcatRosetta` submodule to v0.2.0, dropping a vulnerable transitive `pytest` (< 9.0.3, GHSA tmpdir handling) from its requirements.
+- Added `click>=8.0.0` to runtime dependencies (now required by HashcatRosetta v0.2.0's formatting module).
+
+## [2.9.3]
+
+- Transmission daemon now watches `/tmp/hate_crack/` for new `.torrent` files; wordlist content still downloads to the configured wordlist directory.
+- Suppressed `transmission-daemon` stdout/stderr so daemon log output no longer appears in the terminal.
+- Increased watch-dir polling window to 30s to account for transmission's ~10s scan interval.
+- Store downloaded `.torrent` files in `/tmp/hate_crack/` instead of `/tmp/` root.
+
+## [2.5.0]
+
+- Added tab autocomplete to all file and directory path prompts in the Wordlist Tools submenu (option 80).
+- Restored `hcatOptimizedWordlists` config key (directory for pre-optimized wordlists); defaults to `./optimized_wordlists`, falls back to `hcatWordlists` if not found.
+- Quick Crack now defaults to `hcatOptimizedWordlists` instead of `hcatWordlists`.
+
+## [2.0+]
+
+- Added Random Rules Attack (option 20) using `generate-rules.bin` to generate random mutation rules (#87).
+- Added Ad-hoc Mask Attack (option 17) for user-typed hashcat masks with optional custom character sets.
+- Added Markov Brute Force Attack (option 18) using `hcstat2` statistical tables for password generation.
+- Consolidated Combinator Attacks (formerly options 10/11/12) into interactive submenu under option 6.
+- Markov attack supports training from cracked passwords or any wordlist, with table reuse/regeneration menu.
+- Fixed OMEN attack failing silently when model files were incomplete or enumNG errors occurred.
+- OMEN attack now validates all 5 required model files, captures enumNG stderr, and provides a train/use/cancel menu with wordlist picker.
+- Filtered `.7z`, `.torrent`, and `.out` files from wordlist selection menus (#80).
+- Parallelized Hashmob rule downloads using a thread pool with success/failure summary (#81).
+- Added dynamic optimized kernel (`-O`) flag per attack type via `optimizedKernelAttacks` config (#82).
+- Replaced `uv tool install` with a bash shim for reliable config and asset resolution from any working directory.
+- Fixed config resolution to search the repo root and package directory in addition to CWD.
+- Fixed bare NTLM hash detection failing when hash files contain leading blank lines, BOM characters, or null bytes from UTF-16 encoding.
+- Improved error message for unrecognized hash formats to show the actual first-line content and list expected formats.
+- Fixed rule file path construction in Quick Crack and Loopback Attack using `os.path.join()` instead of string concatenation.
+- Added automatic update checks on startup (check_for_updates config option).
+- Added `packaging` dependency for version comparison.
+- Added OMEN Attack (option 16) using statistical model-based password generation.
+- Added OMEN configuration keys (omenTrainingList, omenMaxCandidates).
+- Added LLM Attack (option 15) using Ollama for AI-generated password candidates.
+- Added Ollama configuration keys (ollamaModel, ollamaNumCtx).
+- Auto-versioning via setuptools-scm from git tags.
+
+## [2.0]
+
+- Modularized codebase into CLI/API/attacks modules.
+- Unified CLI options with config overrides (hashview, hashcat, wordlists, pipal).
+- Added Hashview API integration.
+- Added Weakpass torrent download helpers and Hashmob download wrapper.
+- Improved test coverage and snapshot-based menu validation.
+- Updated documentation and versioning.
+
+## [1.9]
+
+- Revamped the hate_crack output to increase processing speed exponentially; `combine_ntlm_output` function for combining.
+- Introducing new attack mode "Bandrel Methodology".
+- Updated pipal function to output top x number of basewords.
+
+## [1.08]
+
+- Added a Pipal menu option to analyze hashes. https://github.com/digininja/pipal
+
+## [1.07]
+
+- Minor bug fixes with pwdump formatting and unhexify function.
+
+## [1.06]
+
+- Updated the quick crack and recycling functions to use user-customizable rules.
+
+## [1.05]
+
+- Abstraction of rockyou.txt so that you can use whatever dictionary you would like, specified in the config.json.
+- Minor change to quickcrack that allows you to specify 0 for the number of times best64 is chained.
+
+## [1.04]
+
+- Two new attacks: Middle Combinator and Thorough Combinator.
+
+## [1.03]
+
+- Introduction of new feature to use session files for multiple concurrent sessions of hate_crack.
+- Minor bug fix.
+
+## [1.02]
+
+- Introduction of new feature to export the output of pwdump-formatted NTDS outputs to Excel with clear-text passwords.
+
+## [1.01]
+
+- Minor bug fixes.
+
+## [1.00]
+
+- Initial public release.
